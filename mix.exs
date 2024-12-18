@@ -23,7 +23,10 @@ defmodule OtelMetricExporter.MixProject do
     [
       {:protobuf, "~> 0.13.0"},
       {:telemetry, "~> 1.3"},
-      {:telemetry_metrics, "~> 1.0"}
+      {:telemetry_metrics, "~> 1.0"},
+      {:jason, "~> 1.4"},
+      {:nimble_options, "~> 1.1"},
+      {:finch, "~> 0.19"}
     ]
   end
 end
