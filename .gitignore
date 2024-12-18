@@ -24,3 +24,6 @@ otel_metric_exporter-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# windsurf rules
+.windsurfrules
