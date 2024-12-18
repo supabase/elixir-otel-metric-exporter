@@ -1,5 +1,6 @@
 defmodule OtelMetricExporter.MetricStoreTest do
   use ExUnit.Case, async: true
+  import ExUnit.CaptureLog
 
   alias OtelMetricExporter.MetricStore
 
@@ -93,13 +94,12 @@ defmodule OtelMetricExporter.MetricStoreTest do
 
       Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        
+
         assert {"content-type", "application/x-protobuf"} in conn.req_headers
         assert {"accept", "application/x-protobuf"} in conn.req_headers
-        
-        # We can decode the protobuf here if needed for more detailed verification
+
         assert body != ""
-        
+
         Plug.Conn.resp(conn, 200, "")
       end)
 
@@ -132,9 +132,14 @@ defmodule OtelMetricExporter.MetricStoreTest do
       metrics_before = MetricStore.get_metrics()
       assert map_size(metrics_before) > 0
 
-      send(MetricStore, :export)
-      # Give it time to process the export
-      Process.sleep(100)
+      log =
+        capture_log([level: :error], fn ->
+          send(MetricStore, :export)
+          # Give it time to process the export
+          Process.sleep(200)
+        end)
+
+      assert log =~ "Failed to export metrics: {:unexpected_status, %Finch.Response{status: 500"
 
       # Verify metrics were not cleared due to error
       assert MetricStore.get_metrics() == metrics_before
@@ -152,9 +157,14 @@ defmodule OtelMetricExporter.MetricStoreTest do
       metrics_before = MetricStore.get_metrics()
       assert map_size(metrics_before) > 0
 
-      send(MetricStore, :export)
-      # Give it time to process the export
-      Process.sleep(100)
+      log =
+        capture_log([level: :error], fn ->
+          send(MetricStore, :export)
+          # Give it time to process the export
+          Process.sleep(100)
+        end)
+
+      assert log =~ "Failed to export metrics: %Mint.TransportError{reason: :econnrefused}"
 
       # Verify metrics were not cleared due to error
       assert MetricStore.get_metrics() == metrics_before
