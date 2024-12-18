@@ -1,22 +1,25 @@
 defmodule OtelMetricExporter.MetricStore do
-  @moduledoc false
   use GenServer
+
   require Logger
 
   alias OtelMetricExporter.Opentelemetry.Proto.Collector.Metrics.V1.ExportMetricsServiceRequest
+
   alias OtelMetricExporter.Opentelemetry.Proto.Metrics.V1.{
     ResourceMetrics,
     ScopeMetrics,
     Metric,
     NumberDataPoint,
     HistogramDataPoint,
-    Gauge,
     Sum,
-    Histogram,
-    AggregationTemporality
+    Gauge,
+    Histogram
   }
-  alias OtelMetricExporter.Opentelemetry.Proto.Common.V1.KeyValue
-  alias OtelMetricExporter.Opentelemetry.Proto.Common.V1.InstrumentationScope
+
+  alias OtelMetricExporter.Opentelemetry.Proto.Common.V1.{
+    InstrumentationScope,
+    AnyValue
+  }
 
   defmodule State do
     @moduledoc false
@@ -43,40 +46,67 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def init(config) do
-    # Set up periodic export
-    if config.export_period > 0 do
-      Process.send_after(self(), :export_metrics, config.export_period)
-    end
+    metrics = Map.get(config, :metrics, [])
+    Process.send_after(self(), :export, config.export_period)
 
-    {:ok, %State{config: config, metrics: init_metrics(config.metrics)}}
-  end
-
-  @impl true
-  def handle_info(:export_metrics, %{config: config} = state) do
-    # Schedule next export
-    if config.export_period > 0 do
-      Process.send_after(self(), :export_metrics, config.export_period)
-    end
-
-    now = System.system_time(:nanosecond)
-
-    state.metrics
-    |> build_metrics_for_export(now)
-    |> build_export_request()
-    |> export_request(config)
-    |> handle_export_result(state)
+    {:ok, %State{config: config, metrics: init_metrics(metrics)}}
   end
 
   @impl true
   def handle_cast({:record_metric, name, value, tags}, state) do
-    case Map.get(state.metrics, name) do
-      nil ->
-        Logger.warning("Received value for unknown metric #{name}")
-        {:noreply, state}
+    {:noreply, record_metric(name, value, tags, nil, state)}
+  end
 
-      metric_def ->
-        {:noreply, %{state | metrics: update_metric_value(metric_def, name, value, tags, state.metrics)}}
+  def handle_cast({:record_metric, name, value, tags, buckets}, state) do
+    {:noreply, record_metric(name, value, tags, buckets, state)}
+  end
+
+  defp record_metric(name, value, tags, buckets, state) do
+    metric_def = get_or_init_metric(name, state, buckets)
+    updated_values = update_metric_values(metric_def, value, tags)
+
+    put_in(state.metrics[name], %{metric_def | values: updated_values})
+  end
+
+  defp get_or_init_metric(name, state, buckets) do
+    case state.metrics[name] do
+      nil ->
+        # Infer type from name
+        type =
+          cond do
+            String.ends_with?(to_string(name), ".counter") -> :counter
+            String.ends_with?(to_string(name), ".sum") -> :sum
+            String.ends_with?(to_string(name), ".last_value") -> :last_value
+            String.ends_with?(to_string(name), ".distribution") -> :distribution
+            # Default to counter if unknown
+            true -> :counter
+          end
+
+        %{
+          type: type,
+          values: %{},
+          buckets: buckets || state.config.default_buckets
+        }
+
+      existing ->
+        existing
     end
+  end
+
+  defp update_metric_values(%{type: :counter} = metric, value, tags) do
+    Map.update(metric.values, tags, value, &(&1 + value))
+  end
+
+  defp update_metric_values(%{type: :sum} = metric, value, tags) do
+    Map.update(metric.values, tags, value, &(&1 + value))
+  end
+
+  defp update_metric_values(%{type: :last_value} = metric, value, tags) do
+    Map.put(metric.values, tags, value)
+  end
+
+  defp update_metric_values(%{type: :distribution} = metric, value, tags) do
+    Map.update(metric.values, tags, [value], &(&1 ++ [value]))
   end
 
   @impl true
@@ -88,118 +118,16 @@ defmodule OtelMetricExporter.MetricStore do
     GenServer.call(__MODULE__, :get_metrics)
   end
 
-  defp init_metrics(metrics) do
-    metrics
-    |> Enum.map(&init_metric/1)
-    |> Enum.reject(&is_nil/1)
-    |> Map.new()
-  end
-
-  defp init_metric(metric) do
-    type =
-      case metric do
-        %Telemetry.Metrics.Counter{} -> :counter
-        %Telemetry.Metrics.Sum{} -> :sum
-        %Telemetry.Metrics.LastValue{} -> :last_value
-        %Telemetry.Metrics.Distribution{} -> :distribution
-        other ->
-          Logger.warning(
-            "Unsupported metric type #{inspect(other)}. Only counter, sum, last_value and distribution are supported"
-          )
-
-          nil
-      end
-
-    if type do
-      buckets =
-        if type == :distribution do
-          get_in(metric.reporter_options, [:buckets])
-        end
-
-      {metric.name,
-       %{
-         metric: metric,
-         type: type,
-         values: %{},
-         buckets: buckets
-       }}
+  @impl true
+  def handle_info(:export, state) do
+    if state.config.export_period > 0 do
+      Process.send_after(self(), :export, state.config.export_period)
     end
-  end
 
-  defp update_metric_value(metric_def, name, value, tags, metrics) do
-    updated =
-      case metric_def.type do
-        :counter ->
-          update_in(metric_def.values[tags], fn
-            nil -> value
-            existing -> existing + value
-          end)
+    now = System.system_time(:nanosecond)
+    metrics = build_metrics_for_export(state.metrics, now)
 
-        :sum ->
-          update_in(metric_def.values[tags], fn
-            nil -> value
-            existing -> existing + value
-          end)
-
-        :last_value ->
-          put_in(metric_def.values[tags], value)
-
-        :distribution ->
-          update_in(metric_def.values[tags], fn
-            nil -> [value]
-            existing -> [value | existing]
-          end)
-      end
-
-    Map.put(metrics, name, updated)
-  end
-
-  defp build_metrics_for_export(metrics, now) do
-    metrics
-    |> Enum.map(fn {name, metric_def} ->
-      %Metric{
-        name: name,
-        description: metric_def.metric.description || "",
-        unit: metric_def.metric.unit || "",
-        data: build_metric_data(metric_def, now)
-      }
-    end)
-  end
-
-  defp build_metric_data(%{type: :distribution, buckets: buckets, values: values} = metric_def, now) do
-    bounds = buckets || metric_def.config.default_buckets
-
-    {:histogram,
-      %Histogram{
-        data_points: build_histogram_points(values, bounds, now),
-        aggregation_temporality: AggregationTemporality.value(:AGGREGATION_TEMPORALITY_DELTA)
-      }}
-  end
-
-  defp build_metric_data(%{type: :counter, values: values}, now) do
-    {:sum,
-      %Sum{
-        data_points: build_number_points(values, now),
-        aggregation_temporality: AggregationTemporality.value(:AGGREGATION_TEMPORALITY_DELTA),
-        is_monotonic: true
-      }}
-  end
-
-  defp build_metric_data(%{type: :sum, values: values}, now) do
-    {:sum,
-      %Sum{
-        data_points: build_number_points(values, now),
-        aggregation_temporality: AggregationTemporality.value(:AGGREGATION_TEMPORALITY_DELTA),
-        is_monotonic: false
-      }}
-  end
-
-  defp build_metric_data(%{type: :last_value, values: values}, now) do
-    {:gauge, %Gauge{data_points: build_number_points(values, now)}}
-  end
-
-  defp build_export_request(metrics) do
-    %ExportMetricsServiceRequest{
+    request = %ExportMetricsServiceRequest{
       resource_metrics: [
         %ResourceMetrics{
           scope_metrics: [
@@ -214,30 +142,114 @@ defmodule OtelMetricExporter.MetricStore do
         }
       ]
     }
+
+    encoded = ExportMetricsServiceRequest.encode(request)
+    headers = build_headers(state.config)
+    body = maybe_compress(encoded, state.config.otlp_compression)
+
+    Finch.build(
+      :post,
+      "#{state.config.otlp_endpoint}/v1/metrics",
+      Map.to_list(headers),
+      body
+    )
+    |> Finch.request(Module.concat(__MODULE__, Finch))
+    |> handle_response()
+
+    {:noreply, %{state | metrics: %{}}}
   end
 
-  defp handle_export_result(:ok, state) do
-    {:noreply, %{state | metrics: clear_delta_metrics(state.metrics)}}
+  defp init_metrics(metrics) do
+    metrics
+    |> Enum.map(&init_metric/1)
+    |> Enum.reject(&is_nil/1)
+    |> Map.new()
   end
 
-  defp handle_export_result({:error, reason}, state) do
-    Logger.error("Failed to export metrics: #{inspect(reason)}")
-    {:noreply, state}
+  defp init_metric(metric) do
+    type =
+      case metric do
+        %Telemetry.Metrics.Counter{} ->
+          :counter
+
+        %Telemetry.Metrics.Sum{} ->
+          :sum
+
+        %Telemetry.Metrics.LastValue{} ->
+          :last_value
+
+        %Telemetry.Metrics.Distribution{} ->
+          :distribution
+
+        other ->
+          Logger.warning(
+            "Unsupported metric type #{inspect(other)}. Only counter, sum, last_value and distribution are supported"
+          )
+
+          nil
+      end
+
+    if type do
+      buckets =
+        if type == :distribution do
+          get_in(metric.reporter_options, [:buckets])
+        end
+
+      name = metric.name |> Enum.map(&to_string/1) |> Enum.join(".")
+
+      {name,
+       %{
+         metric: metric,
+         type: type,
+         values: %{},
+         buckets: buckets
+       }}
+    end
   end
 
-  # Reset delta metrics after export
-  defp clear_delta_metrics(metrics) do
+  defp build_metrics_for_export(metrics, now) do
     metrics
     |> Enum.map(fn {name, metric_def} ->
-      case metric_def.type do
-        type when type in [:counter, :sum, :distribution] ->
-          {name, %{metric_def | values: %{}}}
+      description = get_in(metric_def, [:metric, :description]) || ""
+      unit = get_in(metric_def, [:metric, :unit]) || ""
 
-        _other ->
-          {name, metric_def}
-      end
+      %Metric{
+        name: name,
+        description: description,
+        unit: unit,
+        data: build_metric_data(metric_def, now)
+      }
     end)
-    |> Map.new()
+  end
+
+  defp build_metric_data(%{type: :distribution, buckets: bounds, values: values}, now) do
+    {:histogram,
+     %Histogram{
+       data_points: build_histogram_points(values, bounds, now),
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
+     }}
+  end
+
+  defp build_metric_data(%{type: :counter, values: values}, now) do
+    {:sum,
+     %Sum{
+       data_points: build_number_points(values, now),
+       is_monotonic: true,
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
+     }}
+  end
+
+  defp build_metric_data(%{type: :sum, values: values}, now) do
+    {:sum,
+     %Sum{
+       data_points: build_number_points(values, now),
+       is_monotonic: false,
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
+     }}
+  end
+
+  defp build_metric_data(%{type: :last_value, values: values}, now) do
+    {:gauge, %Gauge{data_points: build_number_points(values, now)}}
   end
 
   defp build_number_points(values, now) do
@@ -253,74 +265,67 @@ defmodule OtelMetricExporter.MetricStore do
 
   defp build_histogram_points(values, bounds, now) do
     values
-    |> Enum.map(fn {tags, measurements} ->
-      {buckets, sum} = calculate_histogram_buckets(measurements, bounds)
-
+    |> Enum.map(fn {tags, values} ->
       %HistogramDataPoint{
         attributes: build_attributes(tags),
         time_unix_nano: now,
-        count: length(measurements),
-        sum: sum,
-        bucket_counts: buckets,
+        count: length(values),
+        sum: Enum.sum(values),
+        bucket_counts: count_buckets(values, bounds),
         explicit_bounds: bounds
       }
     end)
   end
 
-  defp calculate_histogram_buckets(measurements, bounds) do
-    measurements
-    |> Enum.reduce({List.duplicate(0, length(bounds) + 1), 0}, fn value, {buckets, sum} ->
-      bucket_index =
-        bounds
-        |> Enum.find_index(fn bound -> value <= bound end)
-        |> Kernel.||(length(bounds))
+  defp count_buckets(values, bounds) do
+    # Initialize counts with zeros
+    counts = List.duplicate(0, length(bounds) + 1)
 
-      updated_buckets =
-        List.update_at(buckets, bucket_index, &(&1 + 1))
-
-      {updated_buckets, sum + value}
+    # Count values in each bucket
+    values
+    |> Enum.reduce(counts, fn value, counts ->
+      bucket_index = find_bucket_index(value, bounds)
+      List.update_at(counts, bucket_index, &(&1 + 1))
     end)
+  end
+
+  defp find_bucket_index(value, bounds) do
+    case Enum.find_index(bounds, &(value <= &1)) do
+      # Last bucket (infinity)
+      nil -> length(bounds)
+      index -> index
+    end
   end
 
   defp build_attributes(tags) do
     tags
     |> Enum.map(fn {key, value} ->
-      %KeyValue{
+      %{
         key: to_string(key),
-        value: {:string_value, to_string(value)}
+        value: %AnyValue{value: {:string_value, to_string(value)}}
       }
     end)
   end
 
-  defp export_request(request, config) do
-    encoded = ExportMetricsServiceRequest.encode(request)
-    headers = build_headers(config)
-    body = maybe_compress(encoded, config.otlp_compression)
-
-    Finch.build(
-      :post,
-      "#{config.otlp_endpoint}/v1/metrics",
-      Map.to_list(headers),
-      body
-    )
-    |> Finch.request(Module.concat(__MODULE__, Finch))
-    |> handle_response()
-  end
-
   defp build_headers(config) do
-    headers = Map.put(config.otlp_headers, "content-type", "application/x-protobuf")
-
-    if config.otlp_compression == :gzip do
-      Map.put(headers, "content-encoding", "gzip")
-    else
-      headers
-    end
+    Map.put(config.otlp_headers, "content-type", "application/x-protobuf")
   end
 
-  defp maybe_compress(data, :gzip), do: :zlib.gzip(data)
+  defp maybe_compress(data, :gzip) do
+    :zlib.gzip(data)
+  end
+
   defp maybe_compress(data, _), do: data
 
-  defp handle_response({:ok, %{status: status}}) when status in 200..299, do: :ok
-  defp handle_response({:ok, response}), do: {:error, {:unexpected_response, response}}
-  defp handle_response({:error, reason}), do: {:error, reason}
+  defp handle_response({:ok, %{status: status}}) when status in 200..299 do
+    :ok
+  end
+
+  defp handle_response({:ok, response}) do
+    {:error, {:unexpected_status, response.status, response.body}}
+  end
+
+  defp handle_response({:error, _} = error) do
+    error
+  end
 end

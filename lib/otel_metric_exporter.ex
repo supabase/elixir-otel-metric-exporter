@@ -21,6 +21,7 @@ defmodule OtelMetricExporter do
           ),
         ]
       )
+
   """
   use Supervisor
   require Logger
@@ -31,38 +32,44 @@ defmodule OtelMetricExporter do
 
   @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
 
-  @options_schema NimbleOptions.new!([
-    otlp_protocol: [
-      type: {:in, [:http_protobuf, :http_json]},
-      required: true,
-      doc: "Protocol to use for OTLP export. Currently only HTTP-based protocols are supported"
-    ],
-    otlp_endpoint: [
-      type: :string,
-      required: true,
-      doc: "Endpoint to export metrics to"
-    ],
-    otlp_headers: [
-      type: {:map, :string, :string},
-      default: %{},
-      doc: "Headers to include in the export request"
-    ],
-    otlp_compression: [
-      type: {:in, [:gzip, nil]},
-      default: nil,
-      doc: "Compression to use for the export request"
-    ],
-    export_period: [
-      type: :pos_integer,
-      default: :timer.seconds(30),
-      doc: "Period between exports in milliseconds"
-    ],
-    metrics: [
-      type: {:list, :any},
-      required: true,
-      doc: "List of telemetry metrics to collect"
-    ]
-  ])
+  @options_schema NimbleOptions.new!(
+                    metrics: [
+                      type: {:list, :any},
+                      required: true,
+                      doc: "List of telemetry metrics to track"
+                    ],
+                    otlp_protocol: [
+                      type: {:in, [:http_protobuf, :http_json]},
+                      default: :http_protobuf,
+                      doc:
+                        "Protocol to use for OTLP export. Currently only :http_protobuf and :http_json are supported"
+                    ],
+                    otlp_endpoint: [
+                      type: :string,
+                      required: true,
+                      doc: "Endpoint to send metrics to"
+                    ],
+                    otlp_headers: [
+                      type: :map,
+                      default: %{},
+                      doc: "Headers to send with OTLP requests"
+                    ],
+                    otlp_compression: [
+                      type: {:in, [:gzip, nil]},
+                      default: nil,
+                      doc: "Compression to use for OTLP requests"
+                    ],
+                    export_period: [
+                      type: :pos_integer,
+                      default: :timer.seconds(30),
+                      doc: "Period in milliseconds between metric exports"
+                    ],
+                    default_buckets: [
+                      type: {:list, {:or, [:integer, :float]}},
+                      default: @default_buckets,
+                      doc: "Default buckets to use for distribution metrics"
+                    ]
+                  )
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
@@ -78,15 +85,8 @@ defmodule OtelMetricExporter do
     :ok = setup_telemetry_handlers(config)
 
     children = [
-      {Finch,
-        name: finch_name,
-        pools: %{
-          :default => [
-            size: 10,
-            count: 1
-          ]
-        }},
-      {MetricStore, %{config | default_buckets: @default_buckets}}
+      {Finch, name: finch_name, pools: %{:default => [size: 10, count: 1]}},
+      {MetricStore, config}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
@@ -102,7 +102,7 @@ defmodule OtelMetricExporter do
         :telemetry.attach(
           handler_id,
           event_name,
-          &handle_metric/4,
+          &__MODULE__.handle_metric/4,
           %{metrics: metrics}
         )
 
@@ -115,13 +115,14 @@ defmodule OtelMetricExporter do
     :ok
   end
 
-  defp handle_metric(_event_name, measurements, metadata, %{metrics: metrics}) do
+  @doc false
+  def handle_metric(_event_name, measurements, metadata, %{metrics: metrics}) do
     for metric <- metrics do
       if is_nil(metric.keep) || metric.keep.(metadata) do
         value = extract_measurement(metric, measurements, metadata)
         tags = extract_tags(metric, metadata)
 
-        metric_name = "#{metric.event_name}.#{metric.measurement}"
+        metric_name = "#{Enum.join(metric.name, ".")}"
         GenServer.cast(MetricStore, {:record_metric, metric_name, value, tags})
       end
     end

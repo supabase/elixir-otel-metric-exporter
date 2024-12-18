@@ -3,24 +3,26 @@ defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.AnyValue do
 
   use Protobuf, syntax: :proto3, protoc_gen_elixir_version: "0.13.0"
 
-  oneof :value, 0
+  oneof(:value, 0)
 
-  field :string_value, 1, type: :string, json_name: "stringValue", oneof: 0
-  field :bool_value, 2, type: :bool, json_name: "boolValue", oneof: 0
-  field :int_value, 3, type: :int64, json_name: "intValue", oneof: 0
-  field :double_value, 4, type: :double, json_name: "doubleValue", oneof: 0
+  field(:string_value, 1, type: :string, json_name: "stringValue", oneof: 0)
+  field(:bool_value, 2, type: :bool, json_name: "boolValue", oneof: 0)
+  field(:int_value, 3, type: :int64, json_name: "intValue", oneof: 0)
+  field(:double_value, 4, type: :double, json_name: "doubleValue", oneof: 0)
 
-  field :array_value, 5,
+  field(:array_value, 5,
     type: OtelMetricExporter.Opentelemetry.Proto.Common.V1.ArrayValue,
     json_name: "arrayValue",
     oneof: 0
+  )
 
-  field :kvlist_value, 6,
+  field(:kvlist_value, 6,
     type: OtelMetricExporter.Opentelemetry.Proto.Common.V1.KeyValueList,
     json_name: "kvlistValue",
     oneof: 0
+  )
 
-  field :bytes_value, 7, type: :bytes, json_name: "bytesValue", oneof: 0
+  field(:bytes_value, 7, type: :bytes, json_name: "bytesValue", oneof: 0)
 end
 
 defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.ArrayValue do
@@ -28,9 +30,10 @@ defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.ArrayValue do
 
   use Protobuf, syntax: :proto3, protoc_gen_elixir_version: "0.13.0"
 
-  field :values, 1,
+  field(:values, 1,
     repeated: true,
     type: OtelMetricExporter.Opentelemetry.Proto.Common.V1.AnyValue
+  )
 end
 
 defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.KeyValueList do
@@ -38,9 +41,10 @@ defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.KeyValueList do
 
   use Protobuf, syntax: :proto3, protoc_gen_elixir_version: "0.13.0"
 
-  field :values, 1,
+  field(:values, 1,
     repeated: true,
     type: OtelMetricExporter.Opentelemetry.Proto.Common.V1.KeyValue
+  )
 end
 
 defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.KeyValue do
@@ -48,8 +52,8 @@ defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.KeyValue do
 
   use Protobuf, syntax: :proto3, protoc_gen_elixir_version: "0.13.0"
 
-  field :key, 1, type: :string
-  field :value, 2, type: OtelMetricExporter.Opentelemetry.Proto.Common.V1.AnyValue
+  field(:key, 1, type: :string)
+  field(:value, 2, type: OtelMetricExporter.Opentelemetry.Proto.Common.V1.AnyValue)
 end
 
 defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.InstrumentationScope do
@@ -57,12 +61,13 @@ defmodule OtelMetricExporter.Opentelemetry.Proto.Common.V1.InstrumentationScope 
 
   use Protobuf, syntax: :proto3, protoc_gen_elixir_version: "0.13.0"
 
-  field :name, 1, type: :string
-  field :version, 2, type: :string
+  field(:name, 1, type: :string)
+  field(:version, 2, type: :string)
 
-  field :attributes, 3,
+  field(:attributes, 3,
     repeated: true,
     type: OtelMetricExporter.Opentelemetry.Proto.Common.V1.KeyValue
+  )
 
-  field :dropped_attributes_count, 4, type: :uint32, json_name: "droppedAttributesCount"
+  field(:dropped_attributes_count, 4, type: :uint32, json_name: "droppedAttributesCount")
 end

@@ -2,7 +2,6 @@ defmodule OtelMetricExporter.MetricStoreTest do
   use ExUnit.Case, async: true
 
   alias OtelMetricExporter.MetricStore
-  alias Telemetry.Metrics
 
   @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
 
@@ -13,7 +12,8 @@ defmodule OtelMetricExporter.MetricStoreTest do
       otlp_headers: %{},
       otlp_compression: nil,
       export_period: 1000,
-      default_buckets: @default_buckets
+      default_buckets: @default_buckets,
+      metrics: []
     }
 
     start_supervised!({MetricStore, config})
@@ -29,7 +29,8 @@ defmodule OtelMetricExporter.MetricStoreTest do
       GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
       GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
 
-      assert %{^metric_name => %{type: :counter, values: %{^tags => 3}}} = MetricStore.get_metrics()
+      assert %{^metric_name => %{type: :counter, values: %{^tags => 3}}} =
+               MetricStore.get_metrics()
     end
 
     test "records sum metrics" do
@@ -49,7 +50,8 @@ defmodule OtelMetricExporter.MetricStoreTest do
       GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
       GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
 
-      assert %{^metric_name => %{type: :last_value, values: %{^tags => 2}}} = MetricStore.get_metrics()
+      assert %{^metric_name => %{type: :last_value, values: %{^tags => 2}}} =
+               MetricStore.get_metrics()
     end
 
     test "records distribution metrics" do
@@ -59,7 +61,8 @@ defmodule OtelMetricExporter.MetricStoreTest do
       GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
       GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
 
-      assert %{^metric_name => %{type: :distribution, values: %{^tags => [1, 2]}}} = MetricStore.get_metrics()
+      assert %{^metric_name => %{type: :distribution, values: %{^tags => [1, 2]}}} =
+               MetricStore.get_metrics()
     end
 
     test "handles different tag sets independently" do
@@ -92,7 +95,8 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert map_size(metrics_before) > 0
 
       send(MetricStore, :export)
-      Process.sleep(100)  # Give it time to process the export
+      # Give it time to process the export
+      Process.sleep(100)
 
       # Verify metrics were cleared
       metrics_after = MetricStore.get_metrics()
