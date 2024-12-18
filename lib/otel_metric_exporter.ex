@@ -1,18 +1,6 @@
 defmodule OtelMetricExporter do
   @moduledoc """
-  Documentation for `OtelMetricExporter`.
+  This is a `telemetry` exporter that collects specified metrics
+  and then exports them to an OTel endpoint.
   """
-
-  @doc """
-  Hello world.
-
-  ## Examples
-
-      iex> OtelMetricExporter.hello()
-      :world
-
-  """
-  def hello do
-    :world
-  end
 end
