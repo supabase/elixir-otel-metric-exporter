@@ -79,6 +79,15 @@ defmodule OtelMetricExporter.MetricStore do
     end
   end
 
+  @impl true
+  def handle_call(:get_metrics, _from, state) do
+    {:reply, state.metrics, state}
+  end
+
+  def get_metrics do
+    GenServer.call(__MODULE__, :get_metrics)
+  end
+
   defp init_metrics(metrics) do
     metrics
     |> Enum.map(&init_metric/1)
