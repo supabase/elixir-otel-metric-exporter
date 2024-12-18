@@ -86,7 +86,7 @@ defmodule OtelMetricExporter do
 
     children = [
       {Finch, name: finch_name, pools: %{:default => [size: 10, count: 1]}},
-      {MetricStore, config}
+      {MetricStore, Map.put(config, :finch_pool, finch_name)}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

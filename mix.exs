@@ -26,7 +26,8 @@ defmodule OtelMetricExporter.MixProject do
       {:telemetry_metrics, "~> 1.0"},
       {:jason, "~> 1.4"},
       {:nimble_options, "~> 1.1"},
-      {:finch, "~> 0.19"}
+      {:finch, "~> 0.19"},
+      {:bypass, "~> 2.1", only: [:test]}
     ]
   end
 end

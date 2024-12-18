@@ -6,19 +6,23 @@ defmodule OtelMetricExporter.MetricStoreTest do
   @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
 
   setup do
+    bypass = Bypass.open()
+    {:ok, _} = start_supervised({Finch, name: TestFinch})
+
     config = %{
       otlp_protocol: :http_protobuf,
-      otlp_endpoint: "http://localhost:4318",
+      otlp_endpoint: "http://localhost:#{bypass.port}",
       otlp_headers: %{},
       otlp_compression: nil,
       export_period: 1000,
       default_buckets: @default_buckets,
-      metrics: []
+      metrics: [],
+      finch_pool: TestFinch
     }
 
     start_supervised!({MetricStore, config})
 
-    :ok
+    {:ok, bypass: bypass}
   end
 
   describe "record_metric/3" do
@@ -83,9 +87,21 @@ defmodule OtelMetricExporter.MetricStoreTest do
   end
 
   describe "export flow" do
-    test "exports metrics and clears them" do
+    test "exports metrics in protobuf format", %{bypass: bypass} do
       metric_name = "test.counter"
       tags = %{test: "value"}
+
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        
+        assert {"content-type", "application/x-protobuf"} in conn.req_headers
+        assert {"accept", "application/x-protobuf"} in conn.req_headers
+        
+        # We can decode the protobuf here if needed for more detailed verification
+        assert body != ""
+        
+        Plug.Conn.resp(conn, 200, "")
+      end)
 
       GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
       GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
@@ -99,8 +115,49 @@ defmodule OtelMetricExporter.MetricStoreTest do
       Process.sleep(100)
 
       # Verify metrics were cleared
-      metrics_after = MetricStore.get_metrics()
-      assert map_size(metrics_after) == 0
+      assert MetricStore.get_metrics() == %{}
+    end
+
+    test "handles server errors gracefully", %{bypass: bypass} do
+      metric_name = "test.counter"
+      tags = %{test: "value"}
+
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
+        Plug.Conn.resp(conn, 500, "Internal Server Error")
+      end)
+
+      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
+
+      # Export metrics
+      metrics_before = MetricStore.get_metrics()
+      assert map_size(metrics_before) > 0
+
+      send(MetricStore, :export)
+      # Give it time to process the export
+      Process.sleep(100)
+
+      # Verify metrics were not cleared due to error
+      assert MetricStore.get_metrics() == metrics_before
+    end
+
+    test "handles connection errors gracefully", %{bypass: bypass} do
+      metric_name = "test.counter"
+      tags = %{test: "value"}
+
+      Bypass.down(bypass)
+
+      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
+
+      # Export metrics
+      metrics_before = MetricStore.get_metrics()
+      assert map_size(metrics_before) > 0
+
+      send(MetricStore, :export)
+      # Give it time to process the export
+      Process.sleep(100)
+
+      # Verify metrics were not cleared due to error
+      assert MetricStore.get_metrics() == metrics_before
     end
 
     test "uses configured buckets for distributions" do

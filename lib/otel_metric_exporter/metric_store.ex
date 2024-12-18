@@ -23,10 +23,11 @@ defmodule OtelMetricExporter.MetricStore do
 
   defmodule State do
     @moduledoc false
-    defstruct [:config, metrics: %{}]
+    defstruct [:config, :finch_pool, metrics: %{}]
 
     @type t :: %__MODULE__{
             config: map(),
+            finch_pool: module(),
             metrics: %{
               optional(String.t()) => %{
                 metric: Telemetry.Metrics.t(),
@@ -47,9 +48,10 @@ defmodule OtelMetricExporter.MetricStore do
   @impl true
   def init(config) do
     metrics = Map.get(config, :metrics, [])
+    finch_pool = Map.get(config, :finch_pool, Finch)
     Process.send_after(self(), :export, config.export_period)
 
-    {:ok, %State{config: config, metrics: init_metrics(metrics)}}
+    {:ok, %State{config: config, finch_pool: finch_pool, metrics: init_metrics(metrics)}}
   end
 
   @impl true
@@ -120,12 +122,24 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def handle_info(:export, state) do
-    if state.config.export_period > 0 do
-      Process.send_after(self(), :export, state.config.export_period)
-    end
+    Process.send_after(self(), :export, state.config.export_period)
 
-    now = System.system_time(:nanosecond)
-    metrics = build_metrics_for_export(state.metrics, now)
+    case export_metrics(state) do
+      :ok ->
+        {:noreply, %{state | metrics: %{}}}
+
+      {:error, reason} ->
+        Logger.error("Failed to export metrics: #{inspect(reason)}")
+        {:noreply, state}
+    end
+  end
+
+  defp export_metrics(%{metrics: metrics}) when map_size(metrics) == 0 do
+    :ok
+  end
+
+  defp export_metrics(state) do
+    metrics = Map.values(state.metrics)
 
     request = %ExportMetricsServiceRequest{
       resource_metrics: [
@@ -136,27 +150,32 @@ defmodule OtelMetricExporter.MetricStore do
                 name: "otel_metric_exporter",
                 version: "1.0.0"
               },
-              metrics: metrics
+              metrics: Enum.map(metrics, &convert_metric/1)
             }
           ]
         }
       ]
     }
 
-    encoded = ExportMetricsServiceRequest.encode(request)
-    headers = build_headers(state.config)
-    body = maybe_compress(encoded, state.config.otlp_compression)
+    body = ExportMetricsServiceRequest.encode(request)
 
-    Finch.build(
-      :post,
-      "#{state.config.otlp_endpoint}/v1/metrics",
-      Map.to_list(headers),
-      body
-    )
-    |> Finch.request(Module.concat(__MODULE__, Finch))
-    |> handle_response()
+    headers = [
+      {"content-type", "application/x-protobuf"},
+      {"accept", "application/x-protobuf"}
+      | Map.to_list(state.config.otlp_headers)
+    ]
 
-    {:noreply, %{state | metrics: %{}}}
+    case Finch.build(:post, state.config.otlp_endpoint <> "/v1/metrics", headers, body)
+         |> Finch.request(state.finch_pool) do
+      {:ok, %{status: status}} when status in 200..299 ->
+        :ok
+
+      {:ok, response} ->
+        {:error, {:unexpected_status, response}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp init_metrics(metrics) do
@@ -207,74 +226,92 @@ defmodule OtelMetricExporter.MetricStore do
     end
   end
 
-  defp build_metrics_for_export(metrics, now) do
-    metrics
-    |> Enum.map(fn {name, metric_def} ->
-      description = get_in(metric_def, [:metric, :description]) || ""
-      unit = get_in(metric_def, [:metric, :unit]) || ""
-
-      %Metric{
-        name: name,
-        description: description,
-        unit: unit,
-        data: build_metric_data(metric_def, now)
-      }
-    end)
+  defp convert_metric(%{type: :distribution, buckets: bounds, values: values}) do
+    %Metric{
+      name: "",
+      description: "",
+      unit: "",
+      data:
+        {:histogram,
+         %Histogram{
+           data_points:
+             Enum.map(values, fn {tags, values} ->
+               %HistogramDataPoint{
+                 attributes: build_attributes(tags),
+                 time_unix_nano: System.system_time(:nanosecond),
+                 count: length(values),
+                 sum: Enum.sum(values),
+                 bucket_counts: count_buckets(values, bounds),
+                 explicit_bounds: bounds
+               }
+             end),
+           aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
+         }}
+    }
   end
 
-  defp build_metric_data(%{type: :distribution, buckets: bounds, values: values}, now) do
-    {:histogram,
-     %Histogram{
-       data_points: build_histogram_points(values, bounds, now),
-       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
-     }}
+  defp convert_metric(%{type: :counter, values: values}) do
+    %Metric{
+      name: "",
+      description: "",
+      unit: "",
+      data:
+        {:sum,
+         %Sum{
+           data_points:
+             Enum.map(values, fn {tags, value} ->
+               %NumberDataPoint{
+                 attributes: build_attributes(tags),
+                 time_unix_nano: System.system_time(:nanosecond),
+                 value: {:as_double, value}
+               }
+             end),
+           is_monotonic: true,
+           aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
+         }}
+    }
   end
 
-  defp build_metric_data(%{type: :counter, values: values}, now) do
-    {:sum,
-     %Sum{
-       data_points: build_number_points(values, now),
-       is_monotonic: true,
-       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
-     }}
+  defp convert_metric(%{type: :sum, values: values}) do
+    %Metric{
+      name: "",
+      description: "",
+      unit: "",
+      data:
+        {:sum,
+         %Sum{
+           data_points:
+             Enum.map(values, fn {tags, value} ->
+               %NumberDataPoint{
+                 attributes: build_attributes(tags),
+                 time_unix_nano: System.system_time(:nanosecond),
+                 value: {:as_double, value}
+               }
+             end),
+           is_monotonic: false,
+           aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
+         }}
+    }
   end
 
-  defp build_metric_data(%{type: :sum, values: values}, now) do
-    {:sum,
-     %Sum{
-       data_points: build_number_points(values, now),
-       is_monotonic: false,
-       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
-     }}
-  end
-
-  defp build_metric_data(%{type: :last_value, values: values}, now) do
-    {:gauge, %Gauge{data_points: build_number_points(values, now)}}
-  end
-
-  defp build_number_points(values, now) do
-    values
-    |> Enum.map(fn {tags, value} ->
-      %NumberDataPoint{
-        attributes: build_attributes(tags),
-        time_unix_nano: now,
-        value: {:as_double, value}
-      }
-    end)
-  end
-
-  defp build_histogram_points(values, bounds, now) do
-    values
-    |> Enum.map(fn {tags, values} ->
-      %HistogramDataPoint{
-        attributes: build_attributes(tags),
-        time_unix_nano: now,
-        count: length(values),
-        sum: Enum.sum(values),
-        bucket_counts: count_buckets(values, bounds),
-        explicit_bounds: bounds
-      }
-    end)
+  defp convert_metric(%{type: :last_value, values: values}) do
+    %Metric{
+      name: "",
+      description: "",
+      unit: "",
+      data:
+        {:gauge,
+         %Gauge{
+           data_points:
+             Enum.map(values, fn {tags, value} ->
+               %NumberDataPoint{
+                 attributes: build_attributes(tags),
+                 time_unix_nano: System.system_time(:nanosecond),
+                 value: {:as_double, value}
+               }
+             end)
+         }}
+    }
   end
 
   defp count_buckets(values, bounds) do
@@ -305,27 +342,5 @@ defmodule OtelMetricExporter.MetricStore do
         value: %AnyValue{value: {:string_value, to_string(value)}}
       }
     end)
-  end
-
-  defp build_headers(config) do
-    Map.put(config.otlp_headers, "content-type", "application/x-protobuf")
-  end
-
-  defp maybe_compress(data, :gzip) do
-    :zlib.gzip(data)
-  end
-
-  defp maybe_compress(data, _), do: data
-
-  defp handle_response({:ok, %{status: status}}) when status in 200..299 do
-    :ok
-  end
-
-  defp handle_response({:ok, response}) do
-    {:error, {:unexpected_status, response.status, response.body}}
-  end
-
-  defp handle_response({:error, _} = error) do
-    error
   end
 end
