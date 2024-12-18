@@ -16,7 +16,9 @@ defmodule OtelMetricExporter do
           Telemetry.Metrics.counter("plug.request.stop.duration"),
           Telemetry.Metrics.sum("plug.request.stop.duration"),
           Telemetry.Metrics.last_value("plug.request.stop.duration"),
-          Telemetry.Metrics.distribution("plug.request.stop.duration"),
+          Telemetry.Metrics.distribution("plug.request.stop.duration",
+            reporter_options: [buckets: [0, 10, 100, 1000]] # Optional histogram buckets
+          ),
         ]
       )
   """
@@ -26,6 +28,8 @@ defmodule OtelMetricExporter do
 
   @type protocol :: :http_protobuf | :http_json
   @type compression :: :gzip | nil
+
+  @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
 
   @options_schema NimbleOptions.new!([
     otlp_protocol: [
@@ -82,7 +86,7 @@ defmodule OtelMetricExporter do
             count: 1
           ]
         }},
-      {MetricStore, config}
+      {MetricStore, %{config | default_buckets: @default_buckets}}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
@@ -91,14 +95,15 @@ defmodule OtelMetricExporter do
   defp setup_telemetry_handlers(config) do
     handlers =
       config.metrics
-      |> Enum.map(fn metric ->
-        handler_id = {__MODULE__, metric.name}
+      |> Enum.group_by(& &1.event_name)
+      |> Enum.map(fn {event_name, metrics} ->
+        handler_id = {__MODULE__, event_name}
 
         :telemetry.attach(
           handler_id,
-          metric.event_name,
+          event_name,
           &handle_metric/4,
-          %{metric: metric}
+          %{metrics: metrics}
         )
 
         handler_id
@@ -110,28 +115,29 @@ defmodule OtelMetricExporter do
     :ok
   end
 
-  defp handle_metric(_event_name, measurements, metadata, %{metric: metric}) do
-    value = extract_measurement(metric, measurements)
+  defp handle_metric(_event_name, measurements, metadata, %{metrics: metrics}) do
+    for metric <- metrics do
+      if is_nil(metric.keep) || metric.keep.(metadata) do
+        value = extract_measurement(metric, measurements, metadata)
+        tags = extract_tags(metric, metadata)
 
-    tags = extract_tags(metric, metadata)
-
-    GenServer.cast(MetricStore, {:record_metric, metric.name, value, tags})
+        metric_name = "#{metric.event_name}.#{metric.measurement}"
+        GenServer.cast(MetricStore, {:record_metric, metric_name, value, tags})
+      end
+    end
   end
 
-  defp extract_measurement(metric, measurements) do
+  defp extract_measurement(metric, measurements, metadata) do
     case metric.measurement do
       fun when is_function(fun, 1) -> fun.(measurements)
-      key -> measurements[key]
+      fun when is_function(fun, 2) -> fun.(measurements, metadata)
+      key -> Map.get(measurements, key)
     end
   end
 
   defp extract_tags(metric, metadata) do
-    metric.tags
-    |> Enum.map(fn
-      {tag_key, {module, fun}} -> {tag_key, apply(module, fun, [metadata])}
-      {tag_key, fun} when is_function(fun, 1) -> {tag_key, fun.(metadata)}
-      {tag_key, tag_value} -> {tag_key, tag_value}
-    end)
-    |> Map.new()
+    metadata
+    |> metric.tag_values.()
+    |> Map.take(metric.tags)
   end
 end
