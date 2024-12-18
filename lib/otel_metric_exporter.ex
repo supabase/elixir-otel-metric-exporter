@@ -48,7 +48,7 @@ defmodule OtelMetricExporter do
       doc: "Headers to include in the export request"
     ],
     otlp_compression: [
-      type: {:in, [:gzip]},
+      type: {:in, [:gzip, nil]},
       default: nil,
       doc: "Compression to use for the export request"
     ],
@@ -67,7 +67,7 @@ defmodule OtelMetricExporter do
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     with {:ok, validated} <- NimbleOptions.validate(opts, @options_schema) do
-      Supervisor.start_link(__MODULE__, validated, name: __MODULE__)
+      Supervisor.start_link(__MODULE__, Map.new(validated), name: __MODULE__)
     end
   end
 
