@@ -30,8 +30,6 @@ defmodule OtelMetricExporter do
   @type protocol :: :http_protobuf | :http_json
   @type compression :: :gzip | nil
 
-  @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
-
   @options_schema NimbleOptions.new!(
                     metrics: [
                       type: {:list, :any},
@@ -63,11 +61,6 @@ defmodule OtelMetricExporter do
                       type: :pos_integer,
                       default: :timer.seconds(30),
                       doc: "Period in milliseconds between metric exports"
-                    ],
-                    default_buckets: [
-                      type: {:list, {:or, [:integer, :float]}},
-                      default: @default_buckets,
-                      doc: "Default buckets to use for distribution metrics"
                     ]
                   )
 
@@ -123,7 +116,7 @@ defmodule OtelMetricExporter do
         tags = extract_tags(metric, metadata)
 
         metric_name = "#{Enum.join(metric.name, ".")}"
-        GenServer.cast(MetricStore, {:record_metric, metric_name, value, tags})
+        MetricStore.write_metric(metric, metric_name, value, tags)
       end
     end
   end

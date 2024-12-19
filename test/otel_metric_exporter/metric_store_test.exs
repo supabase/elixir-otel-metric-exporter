@@ -1,7 +1,9 @@
 defmodule OtelMetricExporter.MetricStoreTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   import ExUnit.CaptureLog
 
+  alias OtelMetricExporter.Opentelemetry.Proto.Collector.Metrics.V1.ExportMetricsServiceRequest
+  alias Telemetry.Metrics
   alias OtelMetricExporter.MetricStore
 
   @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
@@ -21,75 +23,91 @@ defmodule OtelMetricExporter.MetricStoreTest do
       finch_pool: TestFinch
     }
 
-    start_supervised!({MetricStore, config})
-
-    {:ok, bypass: bypass}
+    {:ok, bypass: bypass, store_config: config}
   end
 
-  describe "record_metric/3" do
+  describe "recording metrics" do
+    setup %{store_config: config}, do: {:ok, store: start_supervised!({MetricStore, config})}
+
     test "records counter metrics" do
-      metric_name = "test.counter"
+      metric = Metrics.counter("test.value")
       tags = %{test: "value"}
 
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
+      MetricStore.write_metric(metric, 1, tags)
+      MetricStore.write_metric(metric, 2, tags)
 
-      assert %{^metric_name => %{type: :counter, values: %{^tags => 3}}} =
-               MetricStore.get_metrics()
+      metrics = MetricStore.get_metrics()
+
+      assert %{{:counter, "test.value"} => %{^tags => 2}} = metrics
     end
 
     test "records sum metrics" do
-      metric_name = "test.sum"
+      metric = Metrics.sum("test.value")
       tags = %{test: "value"}
 
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
+      MetricStore.write_metric(metric, 1, tags)
+      MetricStore.write_metric(metric, 2, tags)
 
-      assert %{^metric_name => %{type: :sum, values: %{^tags => 3}}} = MetricStore.get_metrics()
+      metrics = MetricStore.get_metrics()
+
+      assert %{{:sum, "test.value"} => %{^tags => 3}} = metrics
     end
 
     test "records last value metrics" do
-      metric_name = "test.last_value"
+      metric = Metrics.last_value("test.value")
       tags = %{test: "value"}
 
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
+      MetricStore.write_metric(metric, 1, tags)
+      MetricStore.write_metric(metric, 2, tags)
 
-      assert %{^metric_name => %{type: :last_value, values: %{^tags => 2}}} =
-               MetricStore.get_metrics()
+      metrics = MetricStore.get_metrics()
+
+      assert %{{:last_value, "test.value"} => %{^tags => 2}} = metrics
     end
 
     test "records distribution metrics" do
-      metric_name = "test.distribution"
+      metric = Metrics.distribution("test.value", reporter_options: [buckets: [2, 4]])
       tags = %{test: "value"}
 
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
+      MetricStore.write_metric(metric, 2, tags)
+      MetricStore.write_metric(metric, 3, tags)
+      MetricStore.write_metric(metric, 5, tags)
+      MetricStore.write_metric(metric, 5, tags)
 
-      assert %{^metric_name => %{type: :distribution, values: %{^tags => [1, 2]}}} =
-               MetricStore.get_metrics()
+      metrics = MetricStore.get_metrics()
+
+      assert %{
+               {:distribution, "test.value"} => %{
+                 ^tags => %{0 => {1, 2}, 1 => {1, 3}, 2 => {2, 10}}
+               }
+             } = metrics
     end
 
     test "handles different tag sets independently" do
-      metric_name = "test.counter"
+      metric = Metrics.sum("test.value")
       tags1 = %{test: "value1"}
       tags2 = %{test: "value2"}
 
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags1})
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags2})
+      MetricStore.write_metric(metric, 1, tags1)
+      MetricStore.write_metric(metric, 2, tags2)
+      MetricStore.write_metric(metric, 2, tags1)
+
+      metrics = MetricStore.get_metrics()
 
       assert %{
-               ^metric_name => %{
-                 type: :counter,
-                 values: %{^tags1 => 1, ^tags2 => 2}
-               }
-             } = MetricStore.get_metrics()
+               {:sum, "test.value"} => %{^tags1 => 3, ^tags2 => 2}
+             } = metrics
     end
   end
 
   describe "export flow" do
-    test "exports metrics in protobuf format", %{bypass: bypass} do
-      metric_name = "test.counter"
+    test "exports all metrics in protobuf format", %{bypass: bypass, store_config: config} do
+      metric1 = Metrics.sum("test.sum")
+      metric2 = Metrics.counter("test.counter")
+      metric3 = Metrics.last_value("test.last_value")
+      metric4 = Metrics.distribution("test.distribution")
+      start_supervised!({MetricStore, %{config | metrics: [metric1, metric2, metric3, metric4]}})
+
       tags = %{test: "value"}
 
       Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
@@ -100,107 +118,64 @@ defmodule OtelMetricExporter.MetricStoreTest do
 
         assert body != ""
 
+        # Decodes withouth raising
+        ExportMetricsServiceRequest.decode(body)
+
         Plug.Conn.resp(conn, 200, "")
       end)
 
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 2, tags})
+      MetricStore.write_metric(metric1, 1, tags)
+      MetricStore.write_metric(metric2, 2, tags)
+      MetricStore.write_metric(metric3, 3, tags)
+      MetricStore.write_metric(metric4, 4, tags)
+      MetricStore.write_metric(metric4, 2000, tags)
 
-      # Export metrics
-      metrics_before = MetricStore.get_metrics()
-      assert map_size(metrics_before) > 0
+      metrics = MetricStore.get_metrics()
+      assert map_size(metrics) > 0
 
-      send(MetricStore, :export)
-      # Give it time to process the export
-      Process.sleep(100)
+      # Export metrics synchronously
+      assert :ok = MetricStore.export_sync()
 
       # Verify metrics were cleared
-      assert MetricStore.get_metrics() == %{}
+      assert MetricStore.get_metrics(0) == %{}
     end
 
-    test "handles server errors gracefully", %{bypass: bypass} do
-      metric_name = "test.counter"
+    test "handles server errors gracefully", %{bypass: bypass, store_config: config} do
+      metric = Metrics.sum("test.sum")
       tags = %{test: "value"}
+      start_supervised!({MetricStore, %{config | metrics: [metric]}})
 
       Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
         Plug.Conn.resp(conn, 500, "Internal Server Error")
       end)
 
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
+      MetricStore.write_metric(metric, 1, tags)
 
-      # Export metrics
-      metrics_before = MetricStore.get_metrics()
-      assert map_size(metrics_before) > 0
+      metrics = MetricStore.get_metrics()
 
-      log =
-        capture_log([level: :error], fn ->
-          send(MetricStore, :export)
-          # Give it time to process the export
-          Process.sleep(200)
-        end)
-
-      assert log =~ "Failed to export metrics: {:unexpected_status, %Finch.Response{status: 500"
+      # Export metrics synchronously
+      assert capture_log(fn -> MetricStore.export_sync() end) =~ "Failed to export metrics"
 
       # Verify metrics were not cleared due to error
-      assert MetricStore.get_metrics() == metrics_before
+      assert MetricStore.get_metrics(0) == metrics
     end
 
-    test "handles connection errors gracefully", %{bypass: bypass} do
-      metric_name = "test.counter"
+    test "handles connection errors gracefully", %{bypass: bypass, store_config: config} do
+      metric = Metrics.sum("test.sum")
       tags = %{test: "value"}
+      start_supervised!({MetricStore, %{config | metrics: [metric]}})
 
       Bypass.down(bypass)
 
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 1, tags})
+      MetricStore.write_metric(metric, 1, tags)
 
-      # Export metrics
-      metrics_before = MetricStore.get_metrics()
-      assert map_size(metrics_before) > 0
+      metrics = MetricStore.get_metrics()
 
-      log =
-        capture_log([level: :error], fn ->
-          send(MetricStore, :export)
-          # Give it time to process the export
-          Process.sleep(100)
-        end)
-
-      assert log =~ "Failed to export metrics: %Mint.TransportError{reason: :econnrefused}"
+      # Export metrics synchronously
+      assert capture_log(fn -> MetricStore.export_sync() end) =~ "Failed to export metrics"
 
       # Verify metrics were not cleared due to error
-      assert MetricStore.get_metrics() == metrics_before
-    end
-
-    test "uses configured buckets for distributions" do
-      metric_name = "test.distribution"
-      tags = %{test: "value"}
-      custom_buckets = [0, 10, 100]
-
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 5, tags, custom_buckets})
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 50, tags, custom_buckets})
-
-      assert %{
-               ^metric_name => %{
-                 type: :distribution,
-                 values: %{^tags => [5, 50]},
-                 buckets: ^custom_buckets
-               }
-             } = MetricStore.get_metrics()
-    end
-
-    test "falls back to default buckets when none provided" do
-      metric_name = "test.distribution"
-      tags = %{test: "value"}
-
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 5, tags})
-      GenServer.cast(MetricStore, {:record_metric, metric_name, 50, tags})
-
-      assert %{
-               ^metric_name => %{
-                 type: :distribution,
-                 values: %{^tags => [5, 50]},
-                 buckets: @default_buckets
-               }
-             } = MetricStore.get_metrics()
+      assert MetricStore.get_metrics(0) == metrics
     end
   end
 end

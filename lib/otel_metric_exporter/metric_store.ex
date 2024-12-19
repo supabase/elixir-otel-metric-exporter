@@ -3,6 +3,7 @@ defmodule OtelMetricExporter.MetricStore do
 
   require Logger
 
+  alias Telemetry.Metrics
   alias OtelMetricExporter.Opentelemetry.Proto.Collector.Metrics.V1.ExportMetricsServiceRequest
 
   alias OtelMetricExporter.Opentelemetry.Proto.Metrics.V1.{
@@ -18,31 +19,111 @@ defmodule OtelMetricExporter.MetricStore do
 
   alias OtelMetricExporter.Opentelemetry.Proto.Common.V1.{
     InstrumentationScope,
-    AnyValue
+    AnyValue,
+    KeyValue
   }
+
+  alias OtelMetricExporter.Opentelemetry.Proto.Resource.V1.Resource
+
+  @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
+  @generation_key {__MODULE__, :generation}
+  @table_name :otel_metric_store
 
   defmodule State do
     @moduledoc false
-    defstruct [:config, :finch_pool, metrics: %{}]
+    defstruct [:config, :finch_pool, :metrics, :last_export]
 
     @type t :: %__MODULE__{
             config: map(),
             finch_pool: module(),
-            metrics: %{
-              optional(String.t()) => %{
-                metric: Telemetry.Metrics.t(),
-                type: :counter | :sum | :last_value | :distribution,
-                values: %{
-                  optional(map()) => number() | [number()]
-                },
-                buckets: [number()] | nil
-              }
-            }
+            metrics: list(),
+            last_export: nil | DateTime.t()
           }
   end
 
   def start_link(config) do
     GenServer.start_link(__MODULE__, config, name: __MODULE__)
+  end
+
+  def get_metrics(generation \\ nil) do
+    generation = generation || :persistent_term.get(@generation_key)
+
+    :ets.match_object(@table_name, {{generation, :_, :_, :_, :_}, :_, :_})
+    |> Enum.reduce(%{}, fn
+      {{_, name, :distribution, tags, bucket}, count, sum}, acc ->
+        Map.update(
+          acc,
+          {:distribution, name},
+          %{tags => %{bucket => {count, sum}}},
+          fn all_tags ->
+            Map.update(all_tags, tags, %{bucket => {count, sum}}, fn all_buckets ->
+              Map.put(all_buckets, bucket, {count, sum})
+            end)
+          end
+        )
+
+      {{_, name, type, tags, _}, value, _}, acc ->
+        Map.update(acc, {type, name}, %{tags => value}, fn all_tags ->
+          Map.put(all_tags, tags, value)
+        end)
+    end)
+  end
+
+  def export_sync do
+    GenServer.call(__MODULE__, :export_sync)
+  end
+
+  defp metric_type(%Metrics.Counter{}), do: :counter
+  defp metric_type(%Metrics.Sum{}), do: :sum
+  defp metric_type(%Metrics.LastValue{}), do: :last_value
+  defp metric_type(%Metrics.Distribution{}), do: :distribution
+
+  def write_metric(metric, value, tags),
+    do: write_metric(metric, Enum.join(metric.name, "."), value, tags)
+
+  def write_metric(%Metrics.Counter{} = metric, string_name, _, tags) do
+    generation = :persistent_term.get(@generation_key)
+    ets_key = {generation, string_name, metric_type(metric), tags, nil}
+
+    :ets.update_counter(@table_name, ets_key, 1, {ets_key, 0, nil})
+  end
+
+  def write_metric(%Metrics.Sum{} = metric, string_name, value, tags) do
+    generation = :persistent_term.get(@generation_key)
+    ets_key = {generation, string_name, metric_type(metric), tags, nil}
+
+    :ets.update_counter(@table_name, ets_key, value, {ets_key, 0, nil})
+  end
+
+  def write_metric(%Metrics.LastValue{} = metric, string_name, value, tags) do
+    generation = :persistent_term.get(@generation_key)
+    ets_key = {generation, string_name, metric_type(metric), tags, nil}
+    :ets.update_element(@table_name, ets_key, {2, value}, {ets_key, value, nil})
+  end
+
+  def write_metric(%Metrics.Distribution{} = metric, string_name, value, tags) do
+    bucket = find_bucket(metric, value)
+    generation = :persistent_term.get(@generation_key)
+    ets_key = {generation, string_name, metric_type(metric), tags, bucket}
+    update_counter_op = {2, 1}
+    update_sum_op = {3, value}
+
+    :ets.update_counter(
+      @table_name,
+      ets_key,
+      [update_counter_op, update_sum_op],
+      {ets_key, 0, 0}
+    )
+  end
+
+  defp find_bucket(%Metrics.Distribution{reporter_options: opts}, value) do
+    bucket_bounds = Keyword.get(opts, :buckets, @default_buckets)
+
+    case Enum.find_index(bucket_bounds, &(value <= &1)) do
+      # Overflow bucket
+      nil -> length(bucket_bounds)
+      idx -> idx
+    end
   end
 
   @impl true
@@ -51,123 +132,108 @@ defmodule OtelMetricExporter.MetricStore do
     finch_pool = Map.get(config, :finch_pool, Finch)
     Process.send_after(self(), :export, config.export_period)
 
-    {:ok, %State{config: config, finch_pool: finch_pool, metrics: init_metrics(metrics)}}
+    # Create ETS table for metrics
+    :ets.new(@table_name, [:set, :public, :named_table, {:write_concurrency, true}])
+    :persistent_term.put(@generation_key, 0)
+
+    {:ok, %State{config: config, finch_pool: finch_pool, metrics: metrics}}
   end
 
   @impl true
-  def handle_cast({:record_metric, name, value, tags}, state) do
-    {:noreply, record_metric(name, value, tags, nil, state)}
-  end
+  def handle_call(:export_sync, _from, state) do
+    case export_metrics(state) do
+      :ok ->
+        {:reply, :ok, state}
 
-  def handle_cast({:record_metric, name, value, tags, buckets}, state) do
-    {:noreply, record_metric(name, value, tags, buckets, state)}
-  end
-
-  defp record_metric(name, value, tags, buckets, state) do
-    metric_def = get_or_init_metric(name, state, buckets)
-    updated_values = update_metric_values(metric_def, value, tags)
-
-    put_in(state.metrics[name], %{metric_def | values: updated_values})
-  end
-
-  defp get_or_init_metric(name, state, buckets) do
-    case state.metrics[name] do
-      nil ->
-        # Infer type from name
-        type =
-          cond do
-            String.ends_with?(to_string(name), ".counter") -> :counter
-            String.ends_with?(to_string(name), ".sum") -> :sum
-            String.ends_with?(to_string(name), ".last_value") -> :last_value
-            String.ends_with?(to_string(name), ".distribution") -> :distribution
-            # Default to counter if unknown
-            true -> :counter
-          end
-
-        %{
-          type: type,
-          values: %{},
-          buckets: buckets || state.config.default_buckets
-        }
-
-      existing ->
-        existing
+      error ->
+        {:reply, error, state}
     end
-  end
-
-  defp update_metric_values(%{type: :counter} = metric, value, tags) do
-    Map.update(metric.values, tags, value, &(&1 + value))
-  end
-
-  defp update_metric_values(%{type: :sum} = metric, value, tags) do
-    Map.update(metric.values, tags, value, &(&1 + value))
-  end
-
-  defp update_metric_values(%{type: :last_value} = metric, value, tags) do
-    Map.put(metric.values, tags, value)
-  end
-
-  defp update_metric_values(%{type: :distribution} = metric, value, tags) do
-    Map.update(metric.values, tags, [value], &(&1 ++ [value]))
-  end
-
-  @impl true
-  def handle_call(:get_metrics, _from, state) do
-    {:reply, state.metrics, state}
-  end
-
-  def get_metrics do
-    GenServer.call(__MODULE__, :get_metrics)
   end
 
   @impl true
   def handle_info(:export, state) do
     Process.send_after(self(), :export, state.config.export_period)
-
+    # Use the same logic as sync export
     case export_metrics(state) do
       :ok ->
-        {:noreply, %{state | metrics: %{}}}
+        {:noreply, state}
 
-      {:error, reason} ->
-        Logger.error("Failed to export metrics: #{inspect(reason)}")
+      {:error, _} ->
         {:noreply, state}
     end
   end
 
-  defp export_metrics(%{metrics: metrics}) when map_size(metrics) == 0 do
-    :ok
+  defp build_kv(tags) do
+    Enum.map(tags, fn {key, value} ->
+      %KeyValue{
+        key: to_string(key),
+        value: %AnyValue{value: {:string_value, to_string(value)}}
+      }
+    end)
   end
 
-  defp export_metrics(state) do
-    metrics = Map.values(state.metrics)
+  defp export_metrics(%State{} = state) do
+    current_gen = :persistent_term.get(@generation_key)
 
+    # Rotate to next generation to avoid overwriting metrics
+    :persistent_term.put(@generation_key, current_gen + 1)
+
+    values = get_metrics(current_gen)
+    generation_bounds = {nil, System.system_time(:nanosecond)}
+
+    Enum.map(values, fn {{type, name}, tagged_values} ->
+      metric =
+        Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
+
+      convert_metric(metric, generation_bounds, tagged_values)
+    end)
+    |> do_export_metrics(state)
+    |> case do
+      :ok ->
+        # Clear exported metrics
+        :ets.match_delete(@table_name, {{current_gen, :_, :_, :_, :_}, :_, :_})
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Failed to export metrics: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp do_export_metrics(metrics, %State{} = state) do
     request = %ExportMetricsServiceRequest{
       resource_metrics: [
         %ResourceMetrics{
+          resource: %Resource{attributes: []},
           scope_metrics: [
             %ScopeMetrics{
-              scope: %InstrumentationScope{
-                name: "otel_metric_exporter",
-                version: "1.0.0"
-              },
-              metrics: Enum.map(metrics, &convert_metric/1)
+              scope: %InstrumentationScope{name: "otel_metric_exporter"},
+              metrics: metrics
             }
           ]
         }
       ]
     }
 
-    body = ExportMetricsServiceRequest.encode(request)
+    headers =
+      Map.merge(
+        %{
+          "content-type" => "application/x-protobuf",
+          "accept" => "application/x-protobuf"
+        },
+        state.config.otlp_headers
+      )
 
-    headers = [
-      {"content-type", "application/x-protobuf"},
-      {"accept", "application/x-protobuf"}
-      | Map.to_list(state.config.otlp_headers)
-    ]
+    request_body = ExportMetricsServiceRequest.encode(request)
 
-    case Finch.build(:post, state.config.otlp_endpoint <> "/v1/metrics", headers, body)
-         |> Finch.request(state.finch_pool) do
-      {:ok, %{status: status}} when status in 200..299 ->
+    case Finch.build(
+           :post,
+           state.config.otlp_endpoint <> "/v1/metrics",
+           Map.to_list(headers),
+           request_body
+         )
+         |> Finch.request(state.config.finch_pool) do
+      {:ok, %{status: 200}} ->
         :ok
 
       {:ok, response} ->
@@ -178,169 +244,108 @@ defmodule OtelMetricExporter.MetricStore do
     end
   end
 
-  defp init_metrics(metrics) do
-    metrics
-    |> Enum.map(&init_metric/1)
-    |> Enum.reject(&is_nil/1)
-    |> Map.new()
-  end
-
-  defp init_metric(metric) do
-    type =
-      case metric do
-        %Telemetry.Metrics.Counter{} ->
-          :counter
-
-        %Telemetry.Metrics.Sum{} ->
-          :sum
-
-        %Telemetry.Metrics.LastValue{} ->
-          :last_value
-
-        %Telemetry.Metrics.Distribution{} ->
-          :distribution
-
-        other ->
-          Logger.warning(
-            "Unsupported metric type #{inspect(other)}. Only counter, sum, last_value and distribution are supported"
-          )
-
-          nil
-      end
-
-    if type do
-      buckets =
-        if type == :distribution do
-          get_in(metric.reporter_options, [:buckets])
-        end
-
-      name = metric.name |> Enum.map(&to_string/1) |> Enum.join(".")
-
-      {name,
-       %{
-         metric: metric,
-         type: type,
-         values: %{},
-         buckets: buckets
-       }}
-    end
-  end
-
-  defp convert_metric(%{type: :distribution, buckets: bounds, values: values}) do
+  defp convert_metric(
+         %{name: name, description: description, unit: unit} = metric,
+         generation_bounds,
+         values
+       ) do
     %Metric{
-      name: "",
-      description: "",
-      unit: "",
-      data:
-        {:histogram,
-         %Histogram{
-           data_points:
-             Enum.map(values, fn {tags, values} ->
-               %HistogramDataPoint{
-                 attributes: build_attributes(tags),
-                 time_unix_nano: System.system_time(:nanosecond),
-                 count: length(values),
-                 sum: Enum.sum(values),
-                 bucket_counts: count_buckets(values, bounds),
-                 explicit_bounds: bounds
-               }
-             end),
-           aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
-         }}
+      name: Enum.join(name, "."),
+      description: description,
+      unit: convert_unit(unit),
+      data: convert_data(metric, generation_bounds, values)
     }
   end
 
-  defp convert_metric(%{type: :counter, values: values}) do
-    %Metric{
-      name: "",
-      description: "",
-      unit: "",
-      data:
-        {:sum,
-         %Sum{
-           data_points:
-             Enum.map(values, fn {tags, value} ->
-               %NumberDataPoint{
-                 attributes: build_attributes(tags),
-                 time_unix_nano: System.system_time(:nanosecond),
-                 value: {:as_double, value}
-               }
-             end),
-           is_monotonic: true,
-           aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
-         }}
-    }
+  defp convert_data(%Metrics.Counter{}, {from, to}, values) do
+    {:sum,
+     %Sum{
+       data_points:
+         Enum.map(values, fn {tags, value} ->
+           %NumberDataPoint{
+             attributes: build_kv(tags),
+             start_time_unix_nano: from,
+             time_unix_nano: to,
+             value: {:as_int, value}
+           }
+         end),
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE,
+       is_monotonic: true
+     }}
   end
 
-  defp convert_metric(%{type: :sum, values: values}) do
-    %Metric{
-      name: "",
-      description: "",
-      unit: "",
-      data:
-        {:sum,
-         %Sum{
-           data_points:
-             Enum.map(values, fn {tags, value} ->
-               %NumberDataPoint{
-                 attributes: build_attributes(tags),
-                 time_unix_nano: System.system_time(:nanosecond),
-                 value: {:as_double, value}
-               }
-             end),
-           is_monotonic: false,
-           aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
-         }}
-    }
+  defp convert_data(%Metrics.Sum{}, {from, to}, values) do
+    {:sum,
+     %Sum{
+       data_points:
+         Enum.map(values, fn {tags, value} ->
+           %NumberDataPoint{
+             attributes: build_kv(tags),
+             start_time_unix_nano: from,
+             time_unix_nano: to,
+             value: {:as_int, value}
+           }
+         end),
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE,
+       is_monotonic: false
+     }}
   end
 
-  defp convert_metric(%{type: :last_value, values: values}) do
-    %Metric{
-      name: "",
-      description: "",
-      unit: "",
-      data:
-        {:gauge,
-         %Gauge{
-           data_points:
-             Enum.map(values, fn {tags, value} ->
-               %NumberDataPoint{
-                 attributes: build_attributes(tags),
-                 time_unix_nano: System.system_time(:nanosecond),
-                 value: {:as_double, value}
-               }
+  defp convert_data(%Metrics.LastValue{}, {from, to}, values) do
+    {:gauge,
+     %Gauge{
+       data_points:
+         Enum.map(values, fn {tags, value} ->
+           %NumberDataPoint{
+             attributes: build_kv(tags),
+             start_time_unix_nano: from,
+             time_unix_nano: to,
+             value: {:as_double, value}
+           }
+         end)
+     }}
+  end
+
+  defp convert_data(%Metrics.Distribution{reporter_options: opts}, {from, to}, values) do
+    bucket_bounds = Keyword.get(opts, :buckets, @default_buckets)
+    total_bucket_bounds = length(bucket_bounds)
+
+    {:histogram,
+     %Histogram{
+       data_points:
+         Enum.map(values, fn {tags, bucket_values} ->
+           {total_count, total_sum} =
+             Enum.reduce(bucket_values, {0, 0.0}, fn {_, {count, sum}},
+                                                     {total_count, total_sum} ->
+               {total_count + count, total_sum + sum}
              end)
-         }}
-    }
+
+           bucket_counts =
+             Enum.map(0..total_bucket_bounds//1, &elem(Map.get(bucket_values, &1, {0, 0}), 0))
+
+           %HistogramDataPoint{
+             attributes: build_kv(tags),
+             start_time_unix_nano: from,
+             time_unix_nano: to,
+             count: total_count,
+             sum: total_sum,
+             bucket_counts: bucket_counts,
+             explicit_bounds: bucket_bounds
+           }
+         end),
+       aggregation_temporality: :AGGREGATION_TEMPORALITY_CUMULATIVE
+     }}
   end
 
-  defp count_buckets(values, bounds) do
-    # Initialize counts with zeros
-    counts = List.duplicate(0, length(bounds) + 1)
-
-    # Count values in each bucket
-    values
-    |> Enum.reduce(counts, fn value, counts ->
-      bucket_index = find_bucket_index(value, bounds)
-      List.update_at(counts, bucket_index, &(&1 + 1))
-    end)
-  end
-
-  defp find_bucket_index(value, bounds) do
-    case Enum.find_index(bounds, &(value <= &1)) do
-      # Last bucket (infinity)
-      nil -> length(bounds)
-      index -> index
-    end
-  end
-
-  defp build_attributes(tags) do
-    tags
-    |> Enum.map(fn {key, value} ->
-      %{
-        key: to_string(key),
-        value: %AnyValue{value: {:string_value, to_string(value)}}
-      }
-    end)
-  end
+  defp convert_unit(:unit), do: nil
+  defp convert_unit(:second), do: "s"
+  defp convert_unit(:millisecond), do: "ms"
+  defp convert_unit(:microsecond), do: "us"
+  defp convert_unit(:nanosecond), do: "ns"
+  defp convert_unit(:byte), do: "By"
+  defp convert_unit(:kilobyte), do: "kBy"
+  defp convert_unit(:megabyte), do: "MBy"
+  defp convert_unit(:gigabyte), do: "GBy"
+  defp convert_unit(:terabyte), do: "TBy"
+  defp convert_unit(x) when is_atom(x), do: Atom.to_string(x)
 end

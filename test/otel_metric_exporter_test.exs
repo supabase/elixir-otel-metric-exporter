@@ -44,7 +44,7 @@ defmodule OtelMetricExporterTest do
   describe "telemetry integration" do
     test "handles telemetry events" do
       metrics = [
-        Telemetry.Metrics.counter("test.event.value", event_name: [:test, :event])
+        Telemetry.Metrics.sum("test.event.value", event_name: [:test, :event])
       ]
 
       start_supervised!({OtelMetricExporter, @base_config ++ [metrics: metrics]})
@@ -55,11 +55,7 @@ defmodule OtelMetricExporterTest do
       Process.sleep(100)
 
       metrics = OtelMetricExporter.MetricStore.get_metrics()
-      metric = metrics["test.event.value"]
-
-      assert metric != nil
-      assert %{} in Map.keys(metric.values)
-      assert metric.values[%{}] == 42
+      assert %{{:sum, "test.event.value"} => %{%{} => 42}} = metrics
     end
 
     test "handles events with keep function" do
@@ -84,18 +80,18 @@ defmodule OtelMetricExporterTest do
       Process.sleep(100)
 
       metrics = OtelMetricExporter.MetricStore.get_metrics()
-      assert get_in(metrics, ["test.filtered.value", :values, %{test: "keep"}]) == 1
-      assert get_in(metrics, ["test.filtered.value", :values, %{test: "drop"}]) == nil
+      assert get_in(metrics, [{:counter, "test.filtered.value"}, %{test: "keep"}]) == 1
+      assert get_in(metrics, [{:counter, "test.filtered.value"}, %{test: "drop"}]) == nil
     end
 
     test "handles measurement functions" do
       metrics = [
-        Telemetry.Metrics.counter(
+        Telemetry.Metrics.sum(
           "test.measured",
           measurement: fn measurements -> measurements.value * 2 end,
           tags: [:test]
         ),
-        Telemetry.Metrics.counter(
+        Telemetry.Metrics.sum(
           "test.measured_with_metadata",
           measurement: fn measurements, metadata -> measurements.value * metadata.multiplier end,
           tags: [:test]
@@ -110,9 +106,9 @@ defmodule OtelMetricExporterTest do
       Process.sleep(100)
 
       metrics = OtelMetricExporter.MetricStore.get_metrics()
-      assert get_in(metrics, ["test.measured", :values, %{test: "value"}]) == 42
+      assert get_in(metrics, [{:sum, "test.measured"}, %{test: "value"}]) == 42
 
-      assert get_in(metrics, ["test.measured_with_metadata", :values, %{test: "value"}]) ==
+      assert get_in(metrics, [{:sum, "test.measured_with_metadata"}, %{test: "value"}]) ==
                63
     end
 
@@ -136,7 +132,7 @@ defmodule OtelMetricExporterTest do
       Process.sleep(100)
 
       metrics = OtelMetricExporter.MetricStore.get_metrics()
-      assert get_in(metrics, ["test.tags.value", :values, %{dynamic: "computed_test"}]) == 42
+      assert get_in(metrics, [{:counter, "test.tags.value"}, %{dynamic: "computed_test"}]) == 1
     end
   end
 end
