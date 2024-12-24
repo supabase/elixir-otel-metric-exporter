@@ -7,7 +7,10 @@ defmodule OtelMetricExporter.MixProject do
       version: "0.1.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      source_url: "https://github.com/electric-sql/elixir-otel-metric-exporter",
+      homepage_url: "https://github.com/electric-sql/elixir-otel-metric-exporter",
+      deps: deps(),
+      docs: &docs/0
     ]
   end
 
@@ -27,7 +30,15 @@ defmodule OtelMetricExporter.MixProject do
       {:jason, "~> 1.4"},
       {:nimble_options, "~> 1.1"},
       {:finch, "~> 0.19"},
-      {:bypass, "~> 2.1", only: [:test]}
+      {:bypass, "~> 2.1", only: [:test]},
+      {:ex_doc, ">= 0.0.0", only: [:dev], runtime: false}
+    ]
+  end
+
+  defp docs do
+    [
+      main: "OtelMetricExporter",
+      api_reference: false
     ]
   end
 end

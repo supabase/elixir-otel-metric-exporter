@@ -2,6 +2,7 @@ defmodule OtelMetricExporter do
   use Supervisor
   require Logger
   alias OtelMetricExporter.MetricStore
+  alias Telemetry.Metrics
 
   @moduledoc """
   This is a `telemetry` exporter that collects specified metrics
@@ -11,7 +12,7 @@ defmodule OtelMetricExporter do
   Example usage:
 
       OtelMetricExporter.start_link(
-        otlp_protocol: :http_protobuf, # Currently `http_protobuf` and `http_json` are supported
+        otlp_protocol: :http_protobuf,
         otlp_endpoint: otlp_endpoint,
         otlp_headers: headers,
         otlp_compression: :gzip,
@@ -35,44 +36,61 @@ defmodule OtelMetricExporter do
   @type protocol :: :http_protobuf | :http_json
   @type compression :: :gzip | nil
 
+  @supported_metrics [
+    Metrics.Counter,
+    Metrics.Sum,
+    Metrics.LastValue,
+    Metrics.Distribution
+  ]
+
   @options_schema NimbleOptions.new!(
                     metrics: [
-                      type: {:list, :any},
+                      type: {:list, {:or, for(x <- @supported_metrics, do: {:struct, x})}},
+                      type_spec: quote(do: list(Metrics.t())),
                       required: true,
-                      doc: "List of telemetry metrics to track"
-                    ],
-                    otlp_protocol: [
-                      type: {:in, [:http_protobuf]},
-                      default: :http_protobuf,
-                      doc:
-                        "Protocol to use for OTLP export. Currently only :http_protobuf and :http_json are supported"
+                      doc: "List of telemetry metrics to track."
                     ],
                     otlp_endpoint: [
                       type: :string,
                       required: true,
-                      doc: "Endpoint to send metrics to"
+                      subsection: "OTLP transport",
+                      doc: "Endpoint to send metrics to."
+                    ],
+                    otlp_protocol: [
+                      type: {:in, [:http_protobuf]},
+                      type_spec: quote(do: protocol()),
+                      default: :http_protobuf,
+                      subsection: "OTLP transport",
+                      doc:
+                        "Protocol to use for OTLP export. Currently only :http_protobuf and :http_json are supported."
                     ],
                     otlp_headers: [
                       type: :map,
                       default: %{},
-                      doc: "Headers to send with OTLP requests"
+                      subsection: "OTLP transport",
+                      doc: "Headers to send with OTLP requests."
                     ],
                     otlp_compression: [
                       type: {:in, [:gzip, nil]},
                       default: :gzip,
-                      doc: "Compression to use for OTLP requests"
+                      type_spec: quote(do: compression()),
+                      subsection: "OTLP transport",
+                      doc:
+                        "Compression to use for OTLP requests. Allowed values are `:gzip` and `nil`."
                     ],
                     resource: [
                       type: :map,
                       default: %{},
-                      doc: "Resource attributes to send with metrics"
+                      doc: "Resource attributes to send with metrics."
                     ],
                     export_period: [
                       type: :pos_integer,
                       default: :timer.minutes(1),
-                      doc: "Period in milliseconds between metric exports"
+                      doc: "Period in milliseconds between metric exports."
                     ]
                   )
+
+  @type option() :: unquote(NimbleOptions.option_typespec(@options_schema))
 
   @doc """
   Start the exporter. It maintains some pieces of global state: ets table and a `:persistent_term` key.
@@ -80,9 +98,13 @@ defmodule OtelMetricExporter do
 
   ## Options
 
+  Options can be provided directly or specified in the `config :otel_metric_exporter` configuration. It's recommended
+  to configure global options in `:otel_metric_exporter` config, and specify metrics where you add this module to the
+  supervision tree.
+
   #{NimbleOptions.docs(@options_schema)}
   """
-  @spec start_link(keyword()) :: Supervisor.on_start()
+  @spec start_link([option()]) :: Supervisor.on_start()
   def start_link(opts) do
     opts = Keyword.merge(Application.get_all_env(:otel_metric_exporter), opts)
 
