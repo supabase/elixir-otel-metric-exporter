@@ -22,7 +22,9 @@ defmodule OtelMetricExporter.MetricStore do
   alias OtelMetricExporter.Opentelemetry.Proto.Common.V1.{
     InstrumentationScope,
     AnyValue,
-    KeyValue
+    KeyValue,
+    KeyValueList,
+    ArrayValue
   }
 
   alias OtelMetricExporter.Opentelemetry.Proto.Resource.V1.Resource
@@ -181,10 +183,22 @@ defmodule OtelMetricExporter.MetricStore do
     Enum.map(tags, fn {key, value} ->
       %KeyValue{
         key: to_string(key),
-        value: %AnyValue{value: {:string_value, to_string(value)}}
+        value: %AnyValue{value: to_kv_value(value)}
       }
     end)
   end
+
+  defp to_kv_value(value) when is_binary(value), do: {:string_value, value}
+  defp to_kv_value(value) when is_integer(value), do: {:int_value, value}
+  defp to_kv_value(value) when is_float(value), do: {:double_value, value}
+  defp to_kv_value(value) when is_boolean(value), do: {:bool_value, value}
+  defp to_kv_value(value) when is_struct(value), do: {:string_value, to_string(value)}
+
+  defp to_kv_value(value) when is_list(value),
+    do: {:array_value, %ArrayValue{values: Enum.map(value, &%AnyValue{value: to_kv_value(&1)})}}
+
+  defp to_kv_value(value) when is_map(value),
+    do: {:kvlist_value, %KeyValueList{values: build_kv(value)}}
 
   defp rotate_generation(%State{} = state) do
     current_gen = :persistent_term.get(@generation_key)
@@ -247,7 +261,7 @@ defmodule OtelMetricExporter.MetricStore do
     request = %ExportMetricsServiceRequest{
       resource_metrics: [
         %ResourceMetrics{
-          resource: %Resource{attributes: []},
+          resource: %Resource{attributes: build_kv(state.config.resource)},
           scope_metrics: [
             %ScopeMetrics{
               scope: %InstrumentationScope{name: "otel_metric_exporter"},

@@ -17,6 +17,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       otlp_endpoint: "http://localhost:#{bypass.port}",
       otlp_headers: %{},
       otlp_compression: nil,
+      resource: %{instance: %{id: "test"}},
       export_period: 1000,
       default_buckets: @default_buckets,
       metrics: [],

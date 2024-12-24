@@ -62,6 +62,11 @@ defmodule OtelMetricExporter do
                       default: :gzip,
                       doc: "Compression to use for OTLP requests"
                     ],
+                    resource: [
+                      type: :map,
+                      default: %{},
+                      doc: "Resource attributes to send with metrics"
+                    ],
                     export_period: [
                       type: :pos_integer,
                       default: :timer.minutes(1),

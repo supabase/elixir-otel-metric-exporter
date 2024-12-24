@@ -1,6 +1,15 @@
 # OtelMetricExporter
 
-**TODO: Add description**
+This is an __unofficial__ OTel-compatible `:telemetry` exporter that collects specified metrics
+and then exports them to an OTel endpoint. It uses metric definitions
+from `:telemetry_metrics` library and does not currently support `Summary` metric type.
+
+This diverges from the official [OTel API requirements](https://opentelemetry.io/docs/specs/otel/metrics/api/) for metrics
+in favour of reusing existing metric definitions from `:telemetry_metrics` library. Consequently, it 
+does not integrate with `:opentelemetry_api` library and the metrics won't have Exemplars with span/trace names
+associated.
+
+Of OTel metric types, this currently doesn't support `ExponentialHistogram` and `Summary` metric types.
 
 ## Installation
 
