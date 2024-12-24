@@ -1,4 +1,6 @@
 defmodule OtelMetricExporter.MetricStore do
+  @moduledoc false
+
   use GenServer
 
   require Logger
@@ -31,15 +33,19 @@ defmodule OtelMetricExporter.MetricStore do
 
   defmodule State do
     @moduledoc false
-    defstruct [:config, :finch_pool, :metrics, :last_export]
+    defstruct [:config, :finch_pool, :metrics, :last_export, :generations_table]
 
     @type t :: %__MODULE__{
             config: map(),
             finch_pool: module(),
             metrics: list(),
+            generations_table: :ets.tid(),
             last_export: nil | DateTime.t()
           }
   end
+
+  @doc false
+  def default_buckets, do: @default_buckets
 
   def start_link(config) do
     GenServer.start_link(__MODULE__, config, name: __MODULE__)
@@ -133,10 +139,18 @@ defmodule OtelMetricExporter.MetricStore do
     Process.send_after(self(), :export, config.export_period)
 
     # Create ETS table for metrics
-    :ets.new(@table_name, [:set, :public, :named_table, {:write_concurrency, true}])
+    :ets.new(@table_name, [:ordered_set, :public, :named_table, {:write_concurrency, true}])
+    generations_table = :ets.new(:generations, [:ordered_set, :private])
+    :ets.insert(generations_table, {0, System.system_time(:nanosecond), 0})
     :persistent_term.put(@generation_key, 0)
 
-    {:ok, %State{config: config, finch_pool: finch_pool, metrics: metrics}}
+    {:ok,
+     %State{
+       config: config,
+       finch_pool: finch_pool,
+       metrics: metrics,
+       generations_table: generations_table
+     }}
   end
 
   @impl true
@@ -172,26 +186,55 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
-  defp export_metrics(%State{} = state) do
+  defp rotate_generation(%State{} = state) do
     current_gen = :persistent_term.get(@generation_key)
-
-    # Rotate to next generation to avoid overwriting metrics
     :persistent_term.put(@generation_key, current_gen + 1)
 
-    values = get_metrics(current_gen)
-    generation_bounds = {nil, System.system_time(:nanosecond)}
+    :ets.update_element(
+      state.generations_table,
+      current_gen,
+      {3, System.system_time(:nanosecond)}
+    )
 
-    Enum.map(values, fn {{type, name}, tagged_values} ->
+    :ets.insert(state.generations_table, {current_gen + 1, System.system_time(:nanosecond), nil})
+
+    current_gen
+  end
+
+  defp export_metrics(%State{} = state) do
+    current_gen = rotate_generation(state)
+
+    earliest_gen =
+      case :ets.first(state.generations_table) do
+        :"$end_of_table" -> 0
+        x -> x
+      end
+
+    earliest_gen..current_gen//1
+    |> Enum.reduce(%{}, fn gen, acc ->
+      {_, start, finish} = List.first(:ets.lookup(state.generations_table, gen), {nil, nil, nil})
+
+      get_metrics(gen)
+      |> Map.new(fn {metric_key, values} ->
+        {metric_key, Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)}
+      end)
+      |> Map.merge(acc, fn _k, v1, v2 -> v2 ++ v1 end)
+    end)
+    |> Enum.map(fn {{type, name}, tagged_values} ->
       metric =
         Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
 
-      convert_metric(metric, generation_bounds, tagged_values)
+      convert_metric(metric, tagged_values)
     end)
     |> do_export_metrics(state)
     |> case do
       :ok ->
         # Clear exported metrics
-        :ets.match_delete(@table_name, {{current_gen, :_, :_, :_, :_}, :_, :_})
+        for x <- earliest_gen..current_gen//1 do
+          :ets.match_delete(@table_name, {{x, :_, :_, :_, :_}, :_, :_})
+          :ets.delete(state.generations_table, x)
+        end
+
         :ok
 
       {:error, reason} ->
@@ -246,22 +289,21 @@ defmodule OtelMetricExporter.MetricStore do
 
   defp convert_metric(
          %{name: name, description: description, unit: unit} = metric,
-         generation_bounds,
          values
        ) do
     %Metric{
       name: Enum.join(name, "."),
       description: description,
       unit: convert_unit(unit),
-      data: convert_data(metric, generation_bounds, values)
+      data: convert_data(metric, values)
     }
   end
 
-  defp convert_data(%Metrics.Counter{}, {from, to}, values) do
+  defp convert_data(%Metrics.Counter{}, values) do
     {:sum,
      %Sum{
        data_points:
-         Enum.map(values, fn {tags, value} ->
+         Enum.map(values, fn {{from, to}, tags, value} ->
            %NumberDataPoint{
              attributes: build_kv(tags),
              start_time_unix_nano: from,
@@ -274,11 +316,11 @@ defmodule OtelMetricExporter.MetricStore do
      }}
   end
 
-  defp convert_data(%Metrics.Sum{}, {from, to}, values) do
+  defp convert_data(%Metrics.Sum{}, values) do
     {:sum,
      %Sum{
        data_points:
-         Enum.map(values, fn {tags, value} ->
+         Enum.map(values, fn {{from, to}, tags, value} ->
            %NumberDataPoint{
              attributes: build_kv(tags),
              start_time_unix_nano: from,
@@ -291,11 +333,11 @@ defmodule OtelMetricExporter.MetricStore do
      }}
   end
 
-  defp convert_data(%Metrics.LastValue{}, {from, to}, values) do
+  defp convert_data(%Metrics.LastValue{}, values) do
     {:gauge,
      %Gauge{
        data_points:
-         Enum.map(values, fn {tags, value} ->
+         Enum.map(values, fn {{from, to}, tags, value} ->
            %NumberDataPoint{
              attributes: build_kv(tags),
              start_time_unix_nano: from,
@@ -306,14 +348,14 @@ defmodule OtelMetricExporter.MetricStore do
      }}
   end
 
-  defp convert_data(%Metrics.Distribution{reporter_options: opts}, {from, to}, values) do
+  defp convert_data(%Metrics.Distribution{reporter_options: opts}, values) do
     bucket_bounds = Keyword.get(opts, :buckets, @default_buckets)
     total_bucket_bounds = length(bucket_bounds)
 
     {:histogram,
      %Histogram{
        data_points:
-         Enum.map(values, fn {tags, bucket_values} ->
+         Enum.map(values, fn {{from, to}, tags, bucket_values} ->
            {total_count, total_sum} =
              Enum.reduce(bucket_values, {0, 0.0}, fn {_, {count, sum}},
                                                      {total_count, total_sum} ->

@@ -1,4 +1,8 @@
 defmodule OtelMetricExporter do
+  use Supervisor
+  require Logger
+  alias OtelMetricExporter.MetricStore
+
   @moduledoc """
   This is a `telemetry` exporter that collects specified metrics
   and then exports them to an OTel endpoint. It uses metric definitions
@@ -17,15 +21,15 @@ defmodule OtelMetricExporter do
           Telemetry.Metrics.sum("plug.request.stop.duration"),
           Telemetry.Metrics.last_value("plug.request.stop.duration"),
           Telemetry.Metrics.distribution("plug.request.stop.duration",
-            reporter_options: [buckets: [0, 10, 100, 1000]] # Optional histogram buckets
+            reporter_options: [buckets: [0, 10, 100, 1000]] # Optional histogram buckets.
           ),
         ]
       )
 
+  Default histogram buckets are `#{inspect(MetricStore.default_buckets())}`
+
+  See all available options in `start_link/2` documentation.
   """
-  use Supervisor
-  require Logger
-  alias OtelMetricExporter.MetricStore
 
   @type protocol :: :http_protobuf | :http_json
   @type compression :: :gzip | nil
@@ -64,6 +68,14 @@ defmodule OtelMetricExporter do
                     ]
                   )
 
+  @doc """
+  Start the exporter. It maintains some pieces of global state: ets table and a `:persistent_term` key.
+  This means that only one exporter instance can be started at a time.
+
+  ## Options
+
+  #{NimbleOptions.docs(@options_schema)}
+  """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     with {:ok, validated} <- NimbleOptions.validate(opts, @options_schema) do

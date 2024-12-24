@@ -177,5 +177,51 @@ defmodule OtelMetricExporter.MetricStoreTest do
       # Verify metrics were not cleared due to error
       assert MetricStore.get_metrics(0) == metrics
     end
+
+    test "preserves metrics across generations on failed exports", %{
+      bypass: bypass,
+      store_config: config
+    } do
+      metric = Metrics.sum("test.sum")
+      tags = %{test: "value"}
+      start_supervised!({MetricStore, %{config | metrics: [metric]}})
+
+      # First generation
+      MetricStore.write_metric(metric, 1, tags)
+
+      # First export fails
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
+        Plug.Conn.resp(conn, 500, "Internal Server Error")
+      end)
+
+      capture_log(fn -> MetricStore.export_sync() end)
+
+      # Second generation
+      MetricStore.write_metric(metric, 2, tags)
+
+      # Second export succeeds and should include both generations
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        metrics = ExportMetricsServiceRequest.decode(body)
+
+        # Verify that we have one metric with sum = 3 (1 from first generation + 2 from second)
+        assert [%{scope_metrics: [%{metrics: [metric]}]}] = metrics.resource_metrics
+
+        assert {:sum, %{data_points: [point1, point2]}} = metric.data
+        assert {:as_int, 1} = point1.value
+        assert {:as_int, 2} = point2.value
+
+        assert point1.time_unix_nano < point2.time_unix_nano
+        assert point2.start_time_unix_nano > point1.time_unix_nano
+
+        Plug.Conn.resp(conn, 200, "")
+      end)
+
+      assert :ok = MetricStore.export_sync()
+
+      # Both generations should be cleared after successful export
+      assert MetricStore.get_metrics(0) == %{}
+      assert MetricStore.get_metrics(1) == %{}
+    end
   end
 end
