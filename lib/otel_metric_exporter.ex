@@ -28,7 +28,8 @@ defmodule OtelMetricExporter do
 
   Default histogram buckets are `#{inspect(MetricStore.default_buckets())}`
 
-  See all available options in `start_link/2` documentation.
+  See all available options in `start_link/2` documentation. Options provided to the `start_link/2`
+  function will be merged with the options provided via `config :otel_metric_exporter` configuraiton.
   """
 
   @type protocol :: :http_protobuf | :http_json
@@ -41,7 +42,7 @@ defmodule OtelMetricExporter do
                       doc: "List of telemetry metrics to track"
                     ],
                     otlp_protocol: [
-                      type: {:in, [:http_protobuf, :http_json]},
+                      type: {:in, [:http_protobuf]},
                       default: :http_protobuf,
                       doc:
                         "Protocol to use for OTLP export. Currently only :http_protobuf and :http_json are supported"
@@ -58,12 +59,12 @@ defmodule OtelMetricExporter do
                     ],
                     otlp_compression: [
                       type: {:in, [:gzip, nil]},
-                      default: nil,
+                      default: :gzip,
                       doc: "Compression to use for OTLP requests"
                     ],
                     export_period: [
                       type: :pos_integer,
-                      default: :timer.seconds(30),
+                      default: :timer.minutes(1),
                       doc: "Period in milliseconds between metric exports"
                     ]
                   )
@@ -78,6 +79,8 @@ defmodule OtelMetricExporter do
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
+    opts = Keyword.merge(Application.get_all_env(:otel_metric_exporter), opts)
+
     with {:ok, validated} <- NimbleOptions.validate(opts, @options_schema) do
       Supervisor.start_link(__MODULE__, Map.new(validated), name: __MODULE__)
     end
