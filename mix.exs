@@ -6,7 +6,7 @@ defmodule OtelMetricExporter.MixProject do
       app: :otel_metric_exporter,
       name: "OTel Metric Exporter",
       description: "An unofficial OTel-compatible metric exporter",
-      version: "0.1.0",
+      version: "0.2.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       source_url: "https://github.com/electric-sql/elixir-otel-metric-exporter",
@@ -32,7 +32,7 @@ defmodule OtelMetricExporter.MixProject do
   defp deps do
     [
       {:protobuf, "~> 0.13.0"},
-      {:telemetry, "~> 1.3"},
+      {:telemetry, "~> 1.0"},
       {:telemetry_metrics, "~> 1.0"},
       {:jason, "~> 1.4"},
       {:nimble_options, "~> 1.1"},
