@@ -65,7 +65,7 @@ defmodule OtelMetricExporter do
                         "Protocol to use for OTLP export. Currently only :http_protobuf and :http_json are supported."
                     ],
                     otlp_headers: [
-                      type: :map,
+                      type: {:map, :string, :string},
                       default: %{},
                       subsection: "OTLP transport",
                       doc: "Headers to send with OTLP requests."
