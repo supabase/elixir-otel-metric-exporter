@@ -114,7 +114,7 @@ defmodule OtelMetricExporter.MetricStore do
     generation = :persistent_term.get(@generation_key)
     ets_key = {generation, string_name, metric_type(metric), tags, bucket}
     update_counter_op = {2, 1}
-    update_sum_op = {3, value}
+    update_sum_op = {3, round(value)}
 
     :ets.update_counter(
       @table_name,
