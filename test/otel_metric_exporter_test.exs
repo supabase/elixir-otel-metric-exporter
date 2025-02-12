@@ -12,12 +12,15 @@ defmodule OtelMetricExporterTest do
     :ok
   end
 
+  @name :otel_metric_exporter_test
+
   @base_config [
     otlp_protocol: :http_protobuf,
     otlp_endpoint: "http://localhost:4318",
     otlp_headers: %{},
     otlp_compression: nil,
-    export_period: 1000
+    export_period: 1000,
+    name: @name
   ]
 
   describe "start_link/1" do
@@ -54,7 +57,7 @@ defmodule OtelMetricExporterTest do
       # Give the GenServer time to process the event
       Process.sleep(100)
 
-      metrics = OtelMetricExporter.MetricStore.get_metrics()
+      metrics = OtelMetricExporter.MetricStore.get_metrics(@name)
       assert %{{:sum, "test.event.value"} => %{%{} => 42}} = metrics
     end
 
@@ -79,7 +82,7 @@ defmodule OtelMetricExporterTest do
       # Give the GenServer time to process the event
       Process.sleep(100)
 
-      metrics = OtelMetricExporter.MetricStore.get_metrics()
+      metrics = OtelMetricExporter.MetricStore.get_metrics(@name)
       assert get_in(metrics, [{:counter, "test.filtered.value"}, %{test: "keep"}]) == 1
       assert get_in(metrics, [{:counter, "test.filtered.value"}, %{test: "drop"}]) == nil
     end
@@ -105,7 +108,7 @@ defmodule OtelMetricExporterTest do
       # Give the GenServer time to process the event
       Process.sleep(100)
 
-      metrics = OtelMetricExporter.MetricStore.get_metrics()
+      metrics = OtelMetricExporter.MetricStore.get_metrics(@name)
       assert get_in(metrics, [{:sum, "test.measured"}, %{test: "value"}]) == 42
 
       assert get_in(metrics, [{:sum, "test.measured_with_metadata"}, %{test: "value"}]) ==
@@ -131,7 +134,7 @@ defmodule OtelMetricExporterTest do
       # Give the GenServer time to process the event
       Process.sleep(100)
 
-      metrics = OtelMetricExporter.MetricStore.get_metrics()
+      metrics = OtelMetricExporter.MetricStore.get_metrics(@name)
       assert get_in(metrics, [{:counter, "test.tags.value"}, %{dynamic: "computed_test"}]) == 1
     end
   end

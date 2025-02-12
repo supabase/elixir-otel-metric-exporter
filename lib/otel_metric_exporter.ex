@@ -87,6 +87,11 @@ defmodule OtelMetricExporter do
                       type: :pos_integer,
                       default: :timer.minutes(1),
                       doc: "Period in milliseconds between metric exports."
+                    ],
+                    name: [
+                      type: :atom,
+                      default: :otel_metric_exporter,
+                      doc: "If you require multiple exporters, give each exporter a unique name."
                     ]
                   )
 
@@ -109,20 +114,15 @@ defmodule OtelMetricExporter do
     opts = Keyword.merge(Application.get_all_env(:otel_metric_exporter), opts)
 
     with {:ok, validated} <- NimbleOptions.validate(opts, @options_schema) do
-      Supervisor.start_link(__MODULE__, Map.new(validated), name: __MODULE__)
+      Supervisor.start_link(__MODULE__, Map.new(validated))
     end
   end
 
   @impl true
   def init(config) do
-    finch_name = Module.concat(__MODULE__, Finch)
-
     :ok = setup_telemetry_handlers(config)
 
-    children = [
-      {Finch, name: finch_name, pools: %{:default => [size: 10, count: 1]}},
-      {MetricStore, Map.put(config, :finch_pool, finch_name)}
-    ]
+    children = [{MetricStore, config}]
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -138,7 +138,7 @@ defmodule OtelMetricExporter do
           handler_id,
           event_name,
           &__MODULE__.handle_metric/4,
-          %{metrics: metrics}
+          %{metrics: metrics, name: config.name}
         )
 
         handler_id
@@ -151,14 +151,14 @@ defmodule OtelMetricExporter do
   end
 
   @doc false
-  def handle_metric(_event_name, measurements, metadata, %{metrics: metrics}) do
+  def handle_metric(_event_name, measurements, metadata, %{metrics: metrics, name: name}) do
     for metric <- metrics do
       if is_nil(metric.keep) || metric.keep.(metadata) do
         value = extract_measurement(metric, measurements, metadata)
         tags = extract_tags(metric, metadata)
 
         metric_name = "#{Enum.join(metric.name, ".")}"
-        MetricStore.write_metric(metric, metric_name, value, tags)
+        MetricStore.write_metric(name, metric, metric_name, value, tags)
       end
     end
   end

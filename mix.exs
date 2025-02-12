@@ -6,7 +6,7 @@ defmodule OtelMetricExporter.MixProject do
       app: :otel_metric_exporter,
       name: "OTel Metric Exporter",
       description: "An unofficial OTel-compatible metric exporter",
-      version: "0.2.2",
+      version: "0.2.3",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       source_url: "https://github.com/electric-sql/elixir-otel-metric-exporter",
@@ -24,7 +24,8 @@ defmodule OtelMetricExporter.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger],
+      mod: {OtelMetricExporter.Application, []}
     ]
   end
 

@@ -30,17 +30,16 @@ defmodule OtelMetricExporter.MetricStore do
   alias OtelMetricExporter.Opentelemetry.Proto.Resource.V1.Resource
 
   @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
-  @generation_key {__MODULE__, :generation}
-  @table_name :otel_metric_store
 
   defmodule State do
     @moduledoc false
-    defstruct [:config, :finch_pool, :metrics, :last_export, :generations_table]
+    defstruct [:config, :finch_pool, :metrics, :metrics_table, :last_export, :generations_table]
 
     @type t :: %__MODULE__{
             config: map(),
             finch_pool: module(),
             metrics: list(),
+            metrics_table: atom(),
             generations_table: :ets.tid(),
             last_export: nil | DateTime.t()
           }
@@ -50,13 +49,13 @@ defmodule OtelMetricExporter.MetricStore do
   def default_buckets, do: @default_buckets
 
   def start_link(config) do
-    GenServer.start_link(__MODULE__, config, name: __MODULE__)
+    GenServer.start_link(__MODULE__, config, name: config.name)
   end
 
-  def get_metrics(generation \\ nil) do
-    generation = generation || :persistent_term.get(@generation_key)
+  def get_metrics(metrics_table, generation \\ nil) do
+    generation = generation || :persistent_term.get(generation_key(metrics_table))
 
-    :ets.match_object(@table_name, {{generation, :_, :_, :_, :_}, :_, :_})
+    :ets.match_object(metrics_table, {{generation, :_, :_, :_, :_}, :_, :_})
     |> Enum.reduce(%{}, fn
       {{_, name, :distribution, tags, bucket}, count, sum}, acc ->
         Map.update(
@@ -77,8 +76,8 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
-  def export_sync do
-    GenServer.call(__MODULE__, :export_sync)
+  def export_sync(name) do
+    GenServer.call(name, :export_sync)
   end
 
   defp metric_type(%Metrics.Counter{}), do: :counter
@@ -86,38 +85,38 @@ defmodule OtelMetricExporter.MetricStore do
   defp metric_type(%Metrics.LastValue{}), do: :last_value
   defp metric_type(%Metrics.Distribution{}), do: :distribution
 
-  def write_metric(metric, value, tags),
-    do: write_metric(metric, Enum.join(metric.name, "."), value, tags)
+  def write_metric(metrics_table, metric, value, tags),
+    do: write_metric(metrics_table, metric, Enum.join(metric.name, "."), value, tags)
 
-  def write_metric(%Metrics.Counter{} = metric, string_name, _, tags) do
-    generation = :persistent_term.get(@generation_key)
+  def write_metric(metrics_table, %Metrics.Counter{} = metric, string_name, _, tags) do
+    generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
-    :ets.update_counter(@table_name, ets_key, 1, {ets_key, 0, nil})
+    :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
   end
 
-  def write_metric(%Metrics.Sum{} = metric, string_name, value, tags) do
-    generation = :persistent_term.get(@generation_key)
+  def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
+    generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
-    :ets.update_counter(@table_name, ets_key, value, {ets_key, 0, nil})
+    :ets.update_counter(metrics_table, ets_key, value, {ets_key, 0, nil})
   end
 
-  def write_metric(%Metrics.LastValue{} = metric, string_name, value, tags) do
-    generation = :persistent_term.get(@generation_key)
+  def write_metric(metrics_table, %Metrics.LastValue{} = metric, string_name, value, tags) do
+    generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
-    :ets.update_element(@table_name, ets_key, {2, value}, {ets_key, value, nil})
+    :ets.update_element(metrics_table, ets_key, {2, value}, {ets_key, value, nil})
   end
 
-  def write_metric(%Metrics.Distribution{} = metric, string_name, value, tags) do
+  def write_metric(metrics_table, %Metrics.Distribution{} = metric, string_name, value, tags) do
     bucket = find_bucket(metric, value)
-    generation = :persistent_term.get(@generation_key)
+    generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, bucket}
     update_counter_op = {2, 1}
     update_sum_op = {3, round(value)}
 
     :ets.update_counter(
-      @table_name,
+      metrics_table,
       ets_key,
       [update_counter_op, update_sum_op],
       {ets_key, 0, 0}
@@ -137,20 +136,23 @@ defmodule OtelMetricExporter.MetricStore do
   @impl true
   def init(config) do
     metrics = Map.get(config, :metrics, [])
-    finch_pool = Map.get(config, :finch_pool, Finch)
+    metrics_table = config.name
+    finch_pool = Map.get(config, :finch_pool, OtelMetricExporter.Finch)
     Process.send_after(self(), :export, config.export_period)
 
     # Create ETS table for metrics
-    :ets.new(@table_name, [:ordered_set, :public, :named_table, {:write_concurrency, true}])
+    :ets.new(metrics_table, [:ordered_set, :public, :named_table, {:write_concurrency, true}])
+
     generations_table = :ets.new(:generations, [:ordered_set, :private])
     :ets.insert(generations_table, {0, System.system_time(:nanosecond), 0})
-    :persistent_term.put(@generation_key, 0)
+    :persistent_term.put(generation_key(metrics_table), 0)
 
     {:ok,
      %State{
        config: config,
        finch_pool: finch_pool,
        metrics: metrics,
+       metrics_table: metrics_table,
        generations_table: generations_table
      }}
   end
@@ -201,8 +203,8 @@ defmodule OtelMetricExporter.MetricStore do
     do: {:kvlist_value, %KeyValueList{values: build_kv(value)}}
 
   defp rotate_generation(%State{} = state) do
-    current_gen = :persistent_term.get(@generation_key)
-    :persistent_term.put(@generation_key, current_gen + 1)
+    current_gen = :persistent_term.get(generation_key(state.metrics_table))
+    :persistent_term.put(generation_key(state.metrics_table), current_gen + 1)
 
     :ets.update_element(
       state.generations_table,
@@ -228,7 +230,7 @@ defmodule OtelMetricExporter.MetricStore do
     |> Enum.reduce(%{}, fn gen, acc ->
       {_, start, finish} = List.first(:ets.lookup(state.generations_table, gen), {nil, nil, nil})
 
-      get_metrics(gen)
+      get_metrics(state.metrics_table, gen)
       |> Map.new(fn {metric_key, values} ->
         {metric_key, Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)}
       end)
@@ -245,7 +247,7 @@ defmodule OtelMetricExporter.MetricStore do
       :ok ->
         # Clear exported metrics
         for x <- earliest_gen..current_gen//1 do
-          :ets.match_delete(@table_name, {{x, :_, :_, :_, :_}, :_, :_})
+          :ets.match_delete(state.metrics_table, {{x, :_, :_, :_, :_}, :_, :_})
           :ets.delete(state.generations_table, x)
         end
 
@@ -289,7 +291,7 @@ defmodule OtelMetricExporter.MetricStore do
            Map.to_list(headers),
            request_body
          )
-         |> Finch.request(state.config.finch_pool) do
+         |> Finch.request(state.finch_pool) do
       {:ok, %{status: 200}} ->
         :ok
 
@@ -404,4 +406,8 @@ defmodule OtelMetricExporter.MetricStore do
   defp convert_unit(:gigabyte), do: "GBy"
   defp convert_unit(:terabyte), do: "TBy"
   defp convert_unit(x) when is_atom(x), do: Atom.to_string(x)
+
+  defp generation_key(metrics_table) do
+    {__MODULE__, metrics_table, :generation}
+  end
 end
