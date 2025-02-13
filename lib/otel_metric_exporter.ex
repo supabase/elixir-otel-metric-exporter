@@ -111,11 +111,19 @@ defmodule OtelMetricExporter do
   """
   @spec start_link([option()]) :: Supervisor.on_start()
   def start_link(opts) do
-    opts = Keyword.merge(Application.get_all_env(:otel_metric_exporter), opts)
+    opts = combine_opts(opts)
 
     with {:ok, validated} <- NimbleOptions.validate(opts, @options_schema) do
       Supervisor.start_link(__MODULE__, Map.new(validated))
     end
+  end
+
+  defp combine_opts(opts) do
+    config_opts = Application.get_all_env(:otel_metric_exporter)
+
+    config_opts
+    |> Keyword.merge(opts)
+    |> Keyword.put(:resource, Map.merge(config_opts[:resource] || %{}, opts[:resource] || %{}))
   end
 
   @impl true
