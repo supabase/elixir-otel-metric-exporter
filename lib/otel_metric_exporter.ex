@@ -140,7 +140,7 @@ defmodule OtelMetricExporter do
       config.metrics
       |> Enum.group_by(& &1.event_name)
       |> Enum.map(fn {event_name, metrics} ->
-        handler_id = {__MODULE__, event_name}
+        handler_id = {__MODULE__, config.name, event_name}
 
         :telemetry.attach(
           handler_id,
