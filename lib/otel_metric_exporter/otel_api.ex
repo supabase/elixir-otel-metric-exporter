@@ -56,7 +56,7 @@ defmodule OtelMetricExporter.OtelApi do
 
   def defaults,
     do:
-      Application.get_env(:otel_metric_exporter, __MODULE__, [])
+      Application.get_all_env(:otel_metric_exporter)
       |> Map.new()
       |> Map.take(Keyword.keys(@public_options))
 
