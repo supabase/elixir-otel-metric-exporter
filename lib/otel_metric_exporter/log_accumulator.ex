@@ -101,18 +101,24 @@ defmodule OtelMetricExporter.LogAccumulator do
     {:noreply, Map.merge(state, Map.merge(rest, %{api: api}))}
   end
 
-  # Do nothing on an empty queue
-  def handle_info(:send_log_batch, %{event_queue: []} = state), do: {:noreply, state}
-
-  def handle_info(:send_log_batch, state)
-      when map_size(state.pending_tasks) < state.api.otlp_concurrent_requests do
-    # We can spin up a new task to send the logs
-    {:noreply, send_events_via_task(state)}
-  end
-
-  # No task budget, so we're blocking on this message
   def handle_info(:send_log_batch, state) do
-    {:noreply, state |> block_until_any_task_ready() |> send_events_via_task()}
+    # Reset the timer
+    state = Map.put(state, :timer_ref, nil)
+
+    case state do
+      %{event_queue: []} ->
+        # Do nothing on an empty queue
+        {:noreply, state}
+
+      %{pending_tasks: pending_tasks, api: api}
+      when map_size(pending_tasks) < api.otlp_concurrent_requests ->
+        # We have some task budget, let's put in a task
+        {:noreply, send_events_via_task(state)}
+
+      _ ->
+        # No task budget, so we're blocking on this message
+        {:noreply, state |> block_until_any_task_ready() |> send_events_via_task()}
+    end
   end
 
   def handle_info({ref, result}, state)
