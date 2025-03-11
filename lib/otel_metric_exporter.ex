@@ -97,6 +97,7 @@ defmodule OtelMetricExporter do
     |> Keyword.put(:resource, deep_merge_maps(config_opts[:resource], opts[:resource]))
   end
 
+  defp deep_merge_maps(nil, nil), do: %{}
   defp deep_merge_maps(nil, map), do: map
   defp deep_merge_maps(map, nil), do: map
 
