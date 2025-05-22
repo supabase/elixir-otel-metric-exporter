@@ -65,10 +65,10 @@ defmodule OtelMetricExporter.Protocol do
     type =
       case reason do
         {:nocatch, _} -> "Uncaught throw"
-        {:crash, _} -> "Crash"
-        :crash -> "Crash"
+        {:timeout, _} -> "EXIT: time out"
+        :timeout -> "EXIT: time out"
         reason when is_exception(reason) -> to_string(reason.__struct__)
-        _ -> inspect(reason)
+        _ -> "EXIT: #{inspect(reason)}"
       end
 
     metadata

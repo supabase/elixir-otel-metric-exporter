@@ -150,8 +150,8 @@ defmodule OtelMetricExporter.LogHandlerIntegrationTest do
       Plug.Conn.resp(conn, 200, "")
     end)
 
-    {:ok, pid} = Task.start_link(fn -> exit(:crash) end)
-    assert_receive {:EXIT, ^pid, :crash}, 500
+    {:ok, pid} = Task.start_link(fn -> exit(:some_exit_reason) end)
+    assert_receive {:EXIT, ^pid, :some_exit_reason}, 500
     assert_receive {:logs, logs}, 500
 
     assert [
@@ -169,8 +169,79 @@ defmodule OtelMetricExporter.LogHandlerIntegrationTest do
         {key, value}
       end)
 
-    assert attributes["exception.message"] == ":crash"
-    assert attributes["exception.type"] == "Crash"
+    assert attributes["exception.message"] == ":some_exit_reason"
+    assert attributes["exception.type"] == "EXIT: :some_exit_reason"
+
+    assert attributes["exception.stacktrace"] =~
+             ~r|test/otel_metric_exporter/log_handler_integration_test.exs:\d+|
+  end
+
+  defmodule TestGenserver do
+    use GenServer
+
+    def start_link(parent), do: GenServer.start_link(__MODULE__, parent)
+    def init(parent), do: {:ok, parent}
+
+    def call_with_timeout(pid, timeout),
+      do: GenServer.call(pid, {:call_with_timeout, timeout}, timeout)
+
+    def perform(pid, func), do: GenServer.call(pid, {:perform, func})
+
+    def handle_call({:call_with_timeout, timeout}, _from, parent) do
+      Process.sleep(timeout)
+      {:reply, :ok, parent}
+    end
+
+    def handle_call({:perform, func}, _from, parent) do
+      {:reply, func.(), parent}
+    end
+  end
+
+  test "captures logs from an EXIT in a genserver", %{bypass: bypass} do
+    parent = self()
+    Process.flag(:trap_exit, true)
+
+    Bypass.expect_once(bypass, "POST", "/v1/logs", fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+      %ExportLogsServiceRequest{resource_logs: [%{scope_logs: [%{log_records: logs}]}]} =
+        decode_request_body(body)
+
+      send(parent, {:logs, logs})
+      Plug.Conn.resp(conn, 200, "")
+    end)
+
+    {:ok, pid1} = TestGenserver.start_link(parent)
+    {:ok, pid2} = TestGenserver.start_link(parent)
+
+    try do
+      TestGenserver.perform(pid1, fn -> TestGenserver.call_with_timeout(pid2, 100) end)
+    catch
+      :exit, _ -> :ok
+    end
+
+    assert_receive {:EXIT, ^pid1, {:timeout, _}}, 500
+    assert_receive {:logs, logs}, 500
+
+    assert [
+             %LogRecord{
+               severity_text: "error",
+               body: %{value: {:string_value, error_message}},
+               attributes: attributes
+             }
+           ] = logs
+
+    assert error_message =~ ~r/GenServer #PID<[\d\.]+> terminating/
+
+    attributes =
+      Map.new(attributes, fn %{key: key, value: %{value: {:string_value, value}}} ->
+        {key, value}
+      end)
+
+    assert attributes["exception.message"] =~
+             ~r|{:timeout, {GenServer, :call, \[#PID<[\d\.]+>, {:call_with_timeout, 100}, 100\]}}|
+
+    assert attributes["exception.type"] == "EXIT: time out"
 
     assert attributes["exception.stacktrace"] =~
              ~r|test/otel_metric_exporter/log_handler_integration_test.exs:\d+|

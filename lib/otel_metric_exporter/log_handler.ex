@@ -118,7 +118,6 @@ defmodule OtelMetricExporter.LogHandler do
          {:ok, acc_config} <-
            LogAccumulator.check_config(accumulator_config_to_validate, reg_name(old_config)),
          :ok <- :logger_olp.set_opts(olp, olp_config) do
-
       :logger_olp.call(olp, {:config_changed, acc_config})
       olp_opts = :logger_olp.get_opts(olp)
       # Return the merged config state for the handler
