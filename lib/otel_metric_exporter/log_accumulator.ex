@@ -50,12 +50,12 @@ defmodule OtelMetricExporter.LogAccumulator do
             ],
             debounce_ms: [
               type: :non_neg_integer,
-              default: 5_000,
+              default: 1_000,
               doc: "Period to accumulate logs before sending them"
             ],
             max_buffer_size: [
               type: :non_neg_integer,
-              default: 10_000,
+              default: 5_000,
               doc: "Max amount of log events to store before sending them"
             ]
           )
