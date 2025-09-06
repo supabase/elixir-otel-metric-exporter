@@ -6,6 +6,7 @@ defmodule OtelMetricExporter.OtelApi.Config do
     :otlp_protocol,
     :otlp_headers,
     :otlp_timeout,
+    :exporter_callback,
     :exporter,
     :resource,
     :otlp_compression,
@@ -69,6 +70,11 @@ defmodule OtelMetricExporter.OtelApi.Config do
       type: :non_neg_integer,
       default: 10,
       doc: "Number of concurrent requests to send to the OTLP endpoint."
+    ],
+    exporter_callback: [
+      type: {:or, [{:fun, 1}, nil]},
+      default: nil,
+      doc: "A callback function invoked instead of making an HTTP request. Must have arity 1"
     ],
     resource: [
       type: {:map, {:or, [:atom, :string]}, :any},

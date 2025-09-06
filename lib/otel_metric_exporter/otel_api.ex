@@ -45,6 +45,12 @@ defmodule OtelMetricExporter.OtelApi do
     |> send_proto("/v1/logs", api)
   end
 
+  def send_metrics(%__MODULE__{config: config}, metrics) when not is_nil(config.exporter_callback) do
+    config.exporter_callback.(metrics)
+
+    :ok
+  end
+
   def send_metrics(%__MODULE__{config: config} = api, metrics) do
     metrics
     |> Protocol.build_metric_service_request(config.resource)
