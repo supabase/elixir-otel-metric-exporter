@@ -6,7 +6,7 @@ defmodule OtelMetricExporter.OtelApi.Config do
     :otlp_protocol,
     :otlp_headers,
     :otlp_timeout,
-    :exporter_callback,
+    :export_callback,
     :exporter,
     :resource,
     :otlp_compression,
@@ -71,10 +71,16 @@ defmodule OtelMetricExporter.OtelApi.Config do
       default: 10,
       doc: "Number of concurrent requests to send to the OTLP endpoint."
     ],
-    exporter_callback: [
-      type: {:or, [{:fun, 1}, nil]},
+    export_callback: [
+      type: {:or, [{:fun, 3}, nil]},
       default: nil,
-      doc: "A callback function invoked instead of making an HTTP request. Must have arity 1"
+      doc: """
+      A callback function invoked instead of making an HTTP request. Should accept as arguments:
+
+      - `batch`: list of signals to be exported
+      - `type`:  kind of signal (:metrics or :logs)
+      - `config`: the options passed to this OtelMetricExporter instance
+      """
     ],
     resource: [
       type: {:map, {:or, [:atom, :string]}, :any},
