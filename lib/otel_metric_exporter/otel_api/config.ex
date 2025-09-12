@@ -72,13 +72,12 @@ defmodule OtelMetricExporter.OtelApi.Config do
       doc: "Number of concurrent requests to send to the OTLP endpoint."
     ],
     export_callback: [
-      type: {:or, [{:fun, 3}, nil]},
+      type: {:or, [{:fun, 2}, nil]},
       default: nil,
       doc: """
       A callback function invoked instead of making an HTTP request. Should accept as arguments:
 
-      - `batch`: list of signals to be exported
-      - `type`:  kind of signal (:metrics or :logs)
+      - `{type, batch}`: kind (:metrics or :logs) and list of signals
       - `config`: the options passed to this OtelMetricExporter instance
       """
     ],

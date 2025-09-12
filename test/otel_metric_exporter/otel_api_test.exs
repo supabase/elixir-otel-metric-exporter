@@ -98,7 +98,7 @@ defmodule OtelMetricExporter.OtelApiTest do
       pid = self()
 
       callback =
-        fn [metric], :metrics, %Config{} ->
+        fn {:metrics, [metric]}, %Config{} ->
           send(pid, metric.description)
         end
 
@@ -116,7 +116,7 @@ defmodule OtelMetricExporter.OtelApiTest do
       pid = self()
 
       callback =
-        fn [log], :logs, %Config{} ->
+        fn {:logs, [log]}, %Config{} ->
           {:string_value, message} = log.body.value
 
           send(pid, message)
