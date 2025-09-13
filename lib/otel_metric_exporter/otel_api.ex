@@ -41,12 +41,14 @@ defmodule OtelMetricExporter.OtelApi do
 
   def send_log_events(%__MODULE__{config: config} = api, events) do
     events
+    |> apply_batch_limit(config.max_batch_size)
     |> Protocol.build_log_service_request(config.resource)
     |> send_proto("/v1/logs", api)
   end
 
   def send_metrics(%__MODULE__{config: config} = api, metrics) do
     metrics
+    |> apply_batch_limit(config.max_batch_size)
     |> Protocol.build_metric_service_request(config.resource)
     |> send_proto("/v1/metrics", api)
   end
@@ -136,4 +138,7 @@ defmodule OtelMetricExporter.OtelApi do
     do: :zlib.gzip(body)
 
   defp maybe_compress(body, _), do: body
+
+  defp apply_batch_limit(batch, :infinity), do: batch
+  defp apply_batch_limit(batch, limit), do: Enum.take(batch, limit)
 end
