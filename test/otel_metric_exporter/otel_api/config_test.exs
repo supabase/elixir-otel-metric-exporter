@@ -39,7 +39,8 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                   resource: %{},
                   otlp_headers: %{},
                   otlp_protocol: :http_protobuf,
-                  otlp_timeout: 10000
+                  otlp_timeout: 10000,
+                  export_callback: nil
                 }}
     end
 
@@ -67,7 +68,8 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                   otlp_headers: %{},
                   otlp_protocol: :http_protobuf,
                   otlp_timeout: 10000,
-                  otlp_endpoint: "http://localhost:4317"
+                  otlp_endpoint: "http://localhost:4317",
+                  export_callback: nil
                 }}
     end
 
@@ -98,7 +100,8 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                   otlp_headers: %{},
                   otlp_protocol: :http_protobuf,
                   otlp_timeout: 10000,
-                  otlp_endpoint: "http://localhost:4317"
+                  otlp_endpoint: "http://localhost:4317",
+                  export_callback: nil
                 }}
     end
   end
