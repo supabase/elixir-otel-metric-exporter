@@ -6,6 +6,7 @@ defmodule OtelMetricExporter.OtelApi.Config do
     :otlp_protocol,
     :otlp_headers,
     :otlp_timeout,
+    :export_callback,
     :exporter,
     :resource,
     :otlp_compression,
@@ -75,6 +76,16 @@ defmodule OtelMetricExporter.OtelApi.Config do
       type: :pos_integer,
       default: 100,
       doc: "Maximum number of metrics to send per batch request."
+    ],
+    export_callback: [
+      type: {:or, [{:fun, 2}, nil]},
+      default: nil,
+      doc: """
+      A callback function invoked instead of making an HTTP request. Should accept as arguments:
+
+      - `{type, batch}`: kind (:metrics or :logs) and list of signals
+      - `config`: the options passed to this OtelMetricExporter instance
+      """
     ],
     resource: [
       type: {:map, {:or, [:atom, :string]}, :any},
