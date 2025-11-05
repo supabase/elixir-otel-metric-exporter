@@ -200,7 +200,8 @@ defmodule OtelMetricExporter.MetricStore do
     metrics =
       earliest_gen..current_gen//1
       |> Enum.flat_map(fn gen ->
-        {_, start, finish} = List.first(:ets.lookup(state.generations_table, gen), {nil, nil, nil})
+        {_, start, finish} =
+          List.first(:ets.lookup(state.generations_table, gen), {nil, nil, nil})
 
         get_metrics(state.metrics_table, gen)
         |> Enum.map(fn {key, values} ->
@@ -210,7 +211,8 @@ defmodule OtelMetricExporter.MetricStore do
       end)
       |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
       |> Enum.map(fn {{type, name}, grouped_values} ->
-        metric = Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
+        metric =
+          Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
 
         convert_metric(metric, List.flatten(grouped_values))
       end)
@@ -267,7 +269,13 @@ defmodule OtelMetricExporter.MetricStore do
     cond do
       # Metric fits in current batch
       current_count + metric_count <= max_size ->
-        do_create_batches(rest, max_size, [metric | current_batch], current_count + metric_count, acc)
+        do_create_batches(
+          rest,
+          max_size,
+          [metric | current_batch],
+          current_count + metric_count,
+          acc
+        )
 
       # Metric needs to be split
       metric_count > max_size ->
@@ -282,9 +290,14 @@ defmodule OtelMetricExporter.MetricStore do
     end
   end
 
-  defp count_data_points(%Metric{data: {_ , %_{data_points: data_points}}}), do: Enum.count(data_points)
+  defp count_data_points(%Metric{data: {_, %_{data_points: data_points}}}),
+    do: Enum.count(data_points)
 
-  defp split_metric(%Metric{name: name, description: description, unit: unit, data: {data_type, data_struct}} = _metric, max_batch_size) do
+  defp split_metric(
+         %Metric{name: name, description: description, unit: unit, data: {data_type, data_struct}} =
+           _metric,
+         max_batch_size
+       ) do
     data_points = data_struct.data_points
 
     data_points
@@ -430,10 +443,17 @@ defmodule OtelMetricExporter.MetricStore do
   defp log_failures(batch_results) do
     for result <- batch_results do
       case result do
-        {:ok, {_, _, :ok}} -> :ok
-        {:ok, {idx, _, {:error, reason}}} -> Logger.error("Failed to export batch #{idx}: #{inspect(reason)}")
-        {:exit, reason} -> Logger.error("Batch export task exited: #{inspect(reason)}")
-        other -> Logger.error("Unexpected batch result: #{inspect(other)}")
+        {:ok, {_, _, :ok}} ->
+          :ok
+
+        {:ok, {idx, _, {:error, reason}}} ->
+          Logger.error("Failed to export batch #{idx}: #{inspect(reason)}")
+
+        {:exit, reason} ->
+          Logger.error("Batch export task exited: #{inspect(reason)}")
+
+        other ->
+          Logger.error("Unexpected batch result: #{inspect(other)}")
       end
     end
   end
