@@ -75,7 +75,7 @@ defmodule OtelMetricExporter.OtelApi.Config do
     ],
     max_batch_size: [
       type: :pos_integer,
-      default: 100,
+      default: 250,
       doc: "Maximum number of metrics to send per batch request."
     ],
     export_callback: [
