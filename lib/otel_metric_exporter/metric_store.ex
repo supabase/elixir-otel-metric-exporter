@@ -211,16 +211,19 @@ defmodule OtelMetricExporter.MetricStore do
       |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
       |> Enum.map(fn {{type, name}, grouped_values} ->
         metric = Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
+
         convert_metric(metric, List.flatten(grouped_values))
       end)
 
+    max_concurrency = Map.get(state.api.config, :max_concurrency, 3)
+
     batch_results =
       metrics
-      |> Enum.chunk_every(state.api.config.max_batch_size)
+      |> create_batches(state.api.config.max_batch_size)
       |> Enum.with_index()
       |> Task.async_stream(
         fn {batch, idx} -> {idx, batch, OtelApi.send_metrics(state.api, batch)} end,
-        max_concurrency: 3,
+        max_concurrency: max_concurrency,
         timeout: 60_000
       )
       |> Enum.to_list()
@@ -230,17 +233,70 @@ defmodule OtelMetricExporter.MetricStore do
           %Metric{name: name, data: data} <- batch,
           do: {otlp_data_type(data), name}
 
-    if length(successful_keys) == length(metrics) and metrics != [] do
+    # Deduplicate successful_keys since split metrics have the same name/type
+    unique_successful_keys = MapSet.new(successful_keys)
+
+    if MapSet.size(unique_successful_keys) == length(metrics) and metrics != [] do
       clear_generations(state, earliest_gen..current_gen//1)
       :ok
     else
       unless successful_keys == [] do
-        delete_metrics_by_keys(state, earliest_gen..current_gen//1, MapSet.new(successful_keys))
+        delete_metrics_by_keys(state, earliest_gen..current_gen//1, unique_successful_keys)
       end
 
       log_failures(batch_results)
       {:error, :partial_failure}
     end
+  end
+
+  defp create_batches(metrics, max_batch_size) do
+    do_create_batches(metrics, max_batch_size, [], 0, [])
+  end
+
+  defp do_create_batches([], _max_size, [], _current_count, acc) do
+    Enum.reverse(acc)
+  end
+
+  defp do_create_batches([], _max_size, current_batch, _current_count, acc) do
+    Enum.reverse([Enum.reverse(current_batch) | acc])
+  end
+
+  defp do_create_batches([metric | rest], max_size, current_batch, current_count, acc) do
+    metric_count = count_data_points(metric)
+
+    cond do
+      # Metric fits in current batch
+      current_count + metric_count <= max_size ->
+        do_create_batches(rest, max_size, [metric | current_batch], current_count + metric_count, acc)
+
+      # Metric needs to be split
+      metric_count > max_size ->
+        chunks = split_metric(metric, max_size)
+        new_acc = if current_batch == [], do: acc, else: [Enum.reverse(current_batch) | acc]
+        do_create_batches(chunks ++ rest, max_size, [], 0, new_acc)
+
+      # Emit current batch and start new one with this metric
+      true ->
+        new_acc = if current_batch == [], do: acc, else: [Enum.reverse(current_batch) | acc]
+        do_create_batches(rest, max_size, [metric], metric_count, new_acc)
+    end
+  end
+
+  defp count_data_points(%Metric{data: {_ , %_{data_points: data_points}}}), do: Enum.count(data_points)
+
+  defp split_metric(%Metric{name: name, description: description, unit: unit, data: {data_type, data_struct}} = _metric, max_batch_size) do
+    data_points = data_struct.data_points
+
+    data_points
+    |> Enum.chunk_every(max_batch_size)
+    |> Enum.map(fn chunk ->
+      %Metric{
+        name: name,
+        description: description,
+        unit: unit,
+        data: {data_type, Map.put(data_struct, :data_points, chunk)}
+      }
+    end)
   end
 
   defp convert_metric(
@@ -361,14 +417,9 @@ defmodule OtelMetricExporter.MetricStore do
 
   defp delete_metrics_by_keys(state, range, keys) do
     for gen <- range do
-      :ets.foldl(
-        fn {{^gen, name, type, _, _}, _, _} = obj, acc ->
-          if MapSet.member?(keys, {type, name}), do: :ets.delete_object(state.metrics_table, obj)
-          acc
-        end,
-        nil,
-        state.metrics_table
-      )
+      for {type, name} <- keys do
+        :ets.match_delete(state.metrics_table, {{gen, name, type, :_, :_}, :_, :_})
+      end
 
       if :ets.match_object(state.metrics_table, {{gen, :_, :_, :_, :_}, :_, :_}) == [] do
         :ets.delete(state.generations_table, gen)
