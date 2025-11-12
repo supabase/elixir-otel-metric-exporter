@@ -217,23 +217,37 @@ defmodule OtelMetricExporter.MetricStore do
         convert_metric(metric, List.flatten(grouped_values))
       end)
 
-    max_concurrency = Map.get(state.api.config, :max_concurrency, 3)
-
-    batch_results =
+    tasks =
       metrics
       |> create_batches(state.api.config.max_batch_size)
-      |> Enum.with_index()
-      |> Task.async_stream(
-        fn {batch, idx} -> {idx, batch, OtelApi.send_metrics(state.api, batch)} end,
-        max_concurrency: max_concurrency,
-        timeout: 60_000
-      )
-      |> Enum.to_list()
+      |> Enum.map(fn batch ->
+        Task.async(fn -> {batch, OtelApi.send_metrics(state.api, batch)} end)
+      end)
+
+    yielded_results = Task.yield_many(tasks, timeout: 15_000)
 
     successful_keys =
-      for {:ok, {_, batch, :ok}} <- batch_results,
-          %Metric{name: name, data: data} <- batch,
-          do: {otlp_data_type(data), name}
+      Enum.reduce(yielded_results, [], fn
+        {_task, {:ok, {batch, :ok}}}, acc ->
+          new_keys = for %Metric{name: name, data: data} <- batch, do: {otlp_data_type(data), name}
+          new_keys ++ acc
+
+        {_task, {:ok, {__batch, {:error, reason}}}}, acc ->
+          Logger.warning("Failed to export batch: #{inspect(reason)}")
+          acc
+
+        {_task, {:ok, other}}, acc ->
+          Logger.warning("Unexpected batch result: #{inspect(other)}")
+          acc
+        {_task, {:exit, reason}}, acc ->
+          Logger.warning("Batch export task crashed: #{inspect(reason)}")
+          acc
+
+        {task, nil}, acc ->
+          Task.shutdown(task, :brutal_kill)
+          Logger.warning("Batch export task exceeded 15s timeout and was killed")
+          acc
+      end)
 
     # Deduplicate successful_keys since split metrics have the same name/type
     unique_successful_keys = MapSet.new(successful_keys)
@@ -246,10 +260,8 @@ defmodule OtelMetricExporter.MetricStore do
         delete_metrics_by_keys(state, earliest_gen..current_gen//1, unique_successful_keys)
       end
 
-      log_failures(batch_results)
-
       # fallback to prune old generations if we do not have 100% success
-      max_generations_to_hold = Map.get(state.api.config, :max_generations, 10)
+      max_generations_to_hold = Map.get(state.api.config, :max_generations, 5)
 
       if current_gen - earliest_gen >= max_generations_to_hold do
         force_clear_range = earliest_gen..(current_gen - max_generations_to_hold)//1
@@ -448,25 +460,6 @@ defmodule OtelMetricExporter.MetricStore do
       end
     end
   end
-
-  defp log_failures(batch_results) do
-    for result <- batch_results do
-      case result do
-        {:ok, {_, _, :ok}} ->
-          :ok
-
-        {:ok, {idx, _, {:error, reason}}} ->
-          Logger.error("Failed to export batch #{idx}: #{inspect(reason)}")
-
-        {:exit, reason} ->
-          Logger.error("Batch export task exited: #{inspect(reason)}")
-
-        other ->
-          Logger.error("Unexpected batch result: #{inspect(other)}")
-      end
-    end
-  end
-
   defp generation_key(metrics_table) do
     {__MODULE__, metrics_table, :generation}
   end
