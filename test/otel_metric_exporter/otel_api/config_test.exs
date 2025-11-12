@@ -35,7 +35,7 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                     exporter: :otlp
                   },
                   otlp_compression: :gzip,
-                  otlp_concurrent_requests: 10,
+                  otlp_concurrent_requests: 50,
                   max_batch_size: 500,
                   resource: %{},
                   otlp_headers: %{},
@@ -64,7 +64,7 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                     otlp_headers: %{"key1" => "value1", "key2" => "value2"}
                   },
                   otlp_compression: :gzip,
-                  otlp_concurrent_requests: 10,
+                  otlp_concurrent_requests: 50,
                   max_batch_size: 500,
                   resource: %{},
                   otlp_headers: %{},
@@ -97,7 +97,7 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                     otlp_headers: %{"key1" => "value1", "key2" => "value2"}
                   },
                   otlp_compression: :gzip,
-                  otlp_concurrent_requests: 10,
+                  otlp_concurrent_requests: 50,
                   max_batch_size: 500,
                   resource: %{},
                   otlp_headers: %{},

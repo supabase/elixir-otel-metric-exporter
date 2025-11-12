@@ -69,7 +69,7 @@ defmodule OtelMetricExporter.OtelApi.Config do
     ],
     otlp_concurrent_requests: [
       type: :non_neg_integer,
-      default: 10,
+      default: 50,
       doc: "Number of concurrent requests to send to the OTLP endpoint."
     ],
     max_batch_size: [
