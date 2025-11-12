@@ -247,6 +247,15 @@ defmodule OtelMetricExporter.MetricStore do
       end
 
       log_failures(batch_results)
+
+      # fallback to prune old generations if we do not have 100% success
+      max_generations_to_hold = Map.get(state.api.config, :max_generations, 10)
+
+      if current_gen - earliest_gen >= max_generations_to_hold do
+        force_clear_range = earliest_gen..(current_gen - max_generations_to_hold)//1
+        clear_generations(state, force_clear_range)
+      end
+
       {:error, :partial_failure}
     end
   end
