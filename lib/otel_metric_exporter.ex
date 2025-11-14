@@ -63,6 +63,19 @@ defmodule OtelMetricExporter do
                         default: :otel_metric_exporter,
                         doc:
                           "If you require multiple exporters, give each exporter a unique name."
+                      ],
+                      extract_tags: [
+                        type: {:or, [{:fun, 2}, nil]},
+                        required: false,
+                        default: nil,
+                        doc: """
+                        Optional custom function for extracting tags from metrics.
+                        Must be a 2-arity function that takes (metric, metadata) and returns a map of tags.
+                        If not provided, uses the default tag extraction which calls metric.tag_values/1
+                        and filters by metric.tags.
+
+                        Example: `fn metric, metadata -> Map.put(metadata, :custom, "value") end`
+                        """
                       ]
                     ] ++ OtelApi.public_options()
                   )
@@ -123,11 +136,17 @@ defmodule OtelMetricExporter do
   end
 
   @doc false
-  def handle_metric(_event_name, measurements, metadata, %{metrics: metrics, name: name}) do
+  def handle_metric(_event_name, measurements, metadata, %{metrics: metrics, name: name} = config) do
     for metric <- metrics do
       if is_nil(metric.keep) || metric.keep.(metadata) do
         value = extract_measurement(metric, measurements, metadata)
-        tags = extract_tags(metric, metadata)
+
+        tags =
+          if extract_fn = config[:extract_tags] do
+            extract_fn.(metric, metadata)
+          else
+            extract_tags(metric, metadata)
+          end
 
         metric_name = "#{Enum.join(metric.name, ".")}"
         MetricStore.write_metric(name, metric, metric_name, value, tags)
