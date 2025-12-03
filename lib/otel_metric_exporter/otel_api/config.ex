@@ -10,7 +10,9 @@ defmodule OtelMetricExporter.OtelApi.Config do
     :exporter,
     :resource,
     :otlp_compression,
-    :otlp_concurrent_requests
+    :otlp_concurrent_requests,
+    :hibernate_after,
+    :spawn_opt
   ]
 
   @type protocol :: :http_protobuf
@@ -85,6 +87,14 @@ defmodule OtelMetricExporter.OtelApi.Config do
       type: {:map, {:or, [:atom, :string]}, :any},
       default: %{},
       doc: "Resource attributes to send with collected data."
+    ],
+    hibernate_after: [
+      type: {:or, [:pos_integer, nil]},
+      doc: "Pass :hibernate_after to all child GenServers"
+    ],
+    spawn_opt: [
+      type: {:or, [{:list, :any}, nil]},
+      doc: "Pass :spawn_opt to all child GenServers"
     ]
   ]
 
