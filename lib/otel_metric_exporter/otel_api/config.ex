@@ -12,7 +12,9 @@ defmodule OtelMetricExporter.OtelApi.Config do
     :otlp_compression,
     :otlp_concurrent_requests,
     :hibernate_after,
-    :spawn_opt
+    :spawn_opt,
+    :max_batch_size,
+    :max_concurrency
   ]
 
   @type protocol :: :http_protobuf
@@ -73,6 +75,11 @@ defmodule OtelMetricExporter.OtelApi.Config do
       default: 10,
       doc: "Number of concurrent requests to send to the OTLP endpoint."
     ],
+    max_batch_size: [
+      type: :pos_integer,
+      default: 250,
+      doc: "Maximum number of metrics to send per batch request."
+    ],
     export_callback: [
       type: {:or, [{:fun, 2}, nil]},
       default: nil,
@@ -82,6 +89,11 @@ defmodule OtelMetricExporter.OtelApi.Config do
       - `{type, batch}`: kind (:metrics or :logs) and list of signals
       - `config`: the options passed to this OtelMetricExporter instance
       """
+    ],
+    max_concurrency: [
+      type: :pos_integer,
+      default: 3,
+      doc: "Maximum number of concurrent batch exports."
     ],
     resource: [
       type: {:map, {:or, [:atom, :string]}, :any},
