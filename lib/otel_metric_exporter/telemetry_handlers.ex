@@ -11,7 +11,16 @@ defmodule OtelMetricExporter.TelemetryHandlers do
   def name(%{name: stack_name}), do: :"#{stack_name}:TelemetryHandlers"
 
   def start_link(config) do
-    GenServer.start_link(__MODULE__, config, name: name(config))
+    GenServer.start_link(__MODULE__, config, genserver_opts(config))
+  end
+
+  defp genserver_opts(config) do
+    [
+      name: name(config),
+      hibernate_after: config[:hibernate_after],
+      spawn_opt: config[:spawn_opt]
+    ]
+    |> Enum.filter(fn {_, v} -> v end)
   end
 
   @impl true

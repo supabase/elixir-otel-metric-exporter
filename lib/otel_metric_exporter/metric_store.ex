@@ -40,7 +40,16 @@ defmodule OtelMetricExporter.MetricStore do
   def default_buckets, do: @default_buckets
 
   def start_link(config) do
-    GenServer.start_link(__MODULE__, config, name: config.name)
+    GenServer.start_link(__MODULE__, config, genserver_opts(config))
+  end
+
+  defp genserver_opts(config) do
+    [
+      name: config.name,
+      hibernate_after: config[:hibernate_after],
+      spawn_opt: config[:spawn_opt]
+    ]
+    |> Enum.filter(fn {_, v} -> v end)
   end
 
   def get_metrics(metrics_table, generation \\ nil) do
