@@ -139,6 +139,31 @@ defmodule OtelMetricExporterTest do
       assert get_in(metrics, [{:counter, "test.tags.value"}, %{dynamic: "computed_test"}]) == 1
     end
 
+    test "handles custom extract_tags function" do
+      custom_extract_tags = fn _metric, metadata ->
+        Map.put(metadata, :custom, "override_#{metadata[:input]}")
+      end
+
+      metrics = [
+        Telemetry.Metrics.counter("test.custom_tags.value", tags: [])
+      ]
+
+      start_supervised!(
+        {OtelMetricExporter,
+         @base_config ++ [metrics: metrics, extract_tags: custom_extract_tags]}
+      )
+
+      :telemetry.execute([:test, :custom_tags], %{value: 1}, %{input: "test"})
+      Process.sleep(100)
+
+      metrics_result = OtelMetricExporter.MetricStore.get_metrics(@name)
+
+      assert get_in(metrics_result, [
+               {:counter, "test.custom_tags.value"},
+               %{input: "test", custom: "override_test"}
+             ]) == 1
+    end
+
     test "handles detaching of handlers on shutdown" do
       test_event = :"event_#{inspect(self())}"
 

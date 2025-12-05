@@ -45,7 +45,7 @@ defmodule OtelMetricExporter.TelemetryHandlers do
         handler_id,
         event_name,
         &OtelMetricExporter.handle_metric/4,
-        %{metrics: metrics, name: config.name}
+        %{metrics: metrics, name: config.name, extract_tags: config[:extract_tags]}
       )
 
       handler_id
