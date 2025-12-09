@@ -206,7 +206,7 @@ defmodule OtelMetricExporter.MetricStore do
 
   defp above_memory_limit?(state) do
     memory_size = :ets.info(state.metrics_table, :memory) * :erlang.system_info(:wordsize)
-    memory_size >= state.api.config.max_table_memory
+    memory_size > state.api.config.max_table_memory
   end
 
   defp has_older_gens?(state) do
@@ -292,8 +292,8 @@ defmodule OtelMetricExporter.MetricStore do
 
   defp earliest_gen(generations_table) do
     case :ets.first(generations_table) do
-        :"$end_of_table" -> 0
-        x -> x
+      :"$end_of_table" -> 0
+      x -> x
     end
   end
 

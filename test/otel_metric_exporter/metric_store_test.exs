@@ -104,6 +104,67 @@ defmodule OtelMetricExporter.MetricStoreTest do
     end
   end
 
+  describe "limit memory usage" do
+    setup %{bypass: bypass, store_config: base_config} do
+      Bypass.stub(
+        bypass,
+        "POST",
+        "/v1/metrics",
+        &Plug.Conn.resp(&1, 500, "")
+      )
+
+      metric = Metrics.sum("test.value")
+      updated_config = %{base_config | metrics: [metric]}
+
+      {:ok, store_config: updated_config, metric: metric}
+    end
+
+    test "deletes oldest generation when threshold is surpassed", %{store_config: base_config, metric: metric} do
+      config = Map.put(base_config, :max_table_memory, 3300)
+      start_supervised!({MetricStore, config})
+
+      MetricStore.write_metric(@name, metric, 1, %{"test" => 1})
+
+      # Creates 2 more generations to ensure only oldest gets deleted
+
+      capture_log(fn ->
+        send(@name, :export)
+        :timer.sleep(100)
+      end)
+
+      MetricStore.write_metric(@name, metric, 2, %{"test" => 2})
+
+      capture_log(fn ->
+        send(@name, :export)
+        :timer.sleep(100)
+      end)
+
+      # generation 0 gets deleted the first time threshold is surpassed
+
+      MetricStore.write_metric(@name, metric, 3, %{"test" => 3})
+      MetricStore.write_metric(@name, metric, 4, %{"test" => 4})
+
+      assert MetricStore.get_metrics(@name, 0) == %{}
+      refute MetricStore.get_metrics(@name, 1) == %{}
+
+      # generation 1 gets deleted if its the oldest when threshold is surpassed
+
+      MetricStore.write_metric(@name, metric, 5, %{"test" => 5})
+      :timer.sleep(100)
+
+      assert MetricStore.get_metrics(@name, 1) == %{}
+    end
+
+    test "don't delete current generation when there is no older ones", %{store_config: base_config, metric: metric} do
+      config = Map.put(base_config, :max_table_memory, 1)
+      start_supervised!({MetricStore, config})
+
+      MetricStore.write_metric(@name, metric, 1, %{"test" => 1})
+
+      refute MetricStore.get_metrics(@name, 0) == %{}
+    end
+  end
+
   describe "export flow" do
     test "exports all metrics in protobuf format", %{bypass: bypass, store_config: config} do
       metric1 = Metrics.sum("test.sum")
