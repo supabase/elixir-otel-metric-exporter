@@ -99,7 +99,7 @@ defmodule OtelMetricExporter.OtelApi.Config do
     max_table_memory: [
       type: :pos_integer,
       default: 2_000_000_000,
-      doc: "Soft limit for table memory usage. Deletes old generations when surpassed."
+      doc: "Soft limit for metrics ETS table memory usage. Deletes old generations when surpassed."
     ],
     resource: [
       type: {:map, {:or, [:atom, :string]}, :any},
