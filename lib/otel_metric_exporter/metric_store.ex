@@ -93,8 +93,6 @@ defmodule OtelMetricExporter.MetricStore do
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
     :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
-
-    trim_metrics_table(metrics_table)
   end
 
   def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
@@ -102,16 +100,12 @@ defmodule OtelMetricExporter.MetricStore do
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
     :ets.update_counter(metrics_table, ets_key, value, {ets_key, 0, nil})
-
-    trim_metrics_table(metrics_table)
   end
 
   def write_metric(metrics_table, %Metrics.LastValue{} = metric, string_name, value, tags) do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
     :ets.update_element(metrics_table, ets_key, {2, value}, {ets_key, value, nil})
-
-    trim_metrics_table(metrics_table)
   end
 
   def write_metric(metrics_table, %Metrics.Distribution{} = metric, string_name, value, tags) do
@@ -127,8 +121,6 @@ defmodule OtelMetricExporter.MetricStore do
       [update_counter_op, update_sum_op],
       {ets_key, 0, 0}
     )
-
-    trim_metrics_table(metrics_table)
   end
 
   defp find_bucket(%Metrics.Distribution{reporter_options: opts}, value) do
@@ -140,9 +132,6 @@ defmodule OtelMetricExporter.MetricStore do
       idx -> idx
     end
   end
-
-  defp trim_metrics_table(table),
-    do: GenServer.cast(table, :trim)
 
   @impl true
   def init(config) do
@@ -193,29 +182,6 @@ defmodule OtelMetricExporter.MetricStore do
     {:noreply, state}
   end
 
-  @impl true
-  def handle_cast(:trim, state) do
-    if above_memory_limit?(state) && has_older_gens?(state) do
-      gen = earliest_gen(state.generations_table)
-
-      clear_generations(state, gen..gen)
-    end
-
-    {:noreply, state}
-  end
-
-  defp above_memory_limit?(state) do
-    memory_size = :ets.info(state.metrics_table, :memory) * :erlang.system_info(:wordsize)
-    memory_size > state.api.config.max_table_memory
-  end
-
-  defp has_older_gens?(state) do
-    earliest = earliest_gen(state.generations_table)
-    current = :persistent_term.get(generation_key(state.metrics_table))
-
-    earliest != current
-  end
-
   defp rotate_generation(%State{} = state) do
     current_gen = :persistent_term.get(generation_key(state.metrics_table))
     :persistent_term.put(generation_key(state.metrics_table), current_gen + 1)
@@ -228,7 +194,29 @@ defmodule OtelMetricExporter.MetricStore do
 
     :ets.insert(state.generations_table, {current_gen + 1, System.system_time(:nanosecond), nil})
 
+    trim_metrics_table(state)
+
     current_gen
+  end
+
+  defp trim_metrics_table(state) do
+    if above_memory_limit?(state) do
+      earliest_gen = earliest_gen(state.generations_table)
+      current_gen = :persistent_term.get(generation_key(state.metrics_table))
+      previous_gen = current_gen - 1
+
+      earliest_gen..previous_gen
+      |> Enum.take_while(fn gen ->
+        clear_generations(state, gen..gen)
+
+        above_memory_limit?(state)
+      end)
+    end
+  end
+
+  defp above_memory_limit?(state) do
+    memory_size = :ets.info(state.metrics_table, :memory) * :erlang.system_info(:wordsize)
+    memory_size > state.api.config.max_table_memory
   end
 
   defp export_metrics(%State{} = state) do
