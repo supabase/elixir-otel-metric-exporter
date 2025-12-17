@@ -104,6 +104,96 @@ defmodule OtelMetricExporter.MetricStoreTest do
     end
   end
 
+  describe "limit memory usage" do
+    setup %{bypass: bypass, store_config: base_config} do
+      Bypass.stub(
+        bypass,
+        "POST",
+        "/v1/metrics",
+        &Plug.Conn.resp(&1, 500, "")
+      )
+
+      metric = Metrics.sum("test.value")
+      updated_config = %{base_config | metrics: [metric]}
+
+      {:ok, store_config: updated_config, metric: metric}
+    end
+
+  defp induce_rotate_generation do
+      capture_log(fn ->
+        send(@name, :export)
+        :timer.sleep(100)
+      end)
+    end
+
+    test "gen rotation deletes oldest gen when threshold is surpassed", %{store_config: base_config, metric: metric} do
+      config = Map.put(base_config, :max_table_memory, 3200)
+      start_supervised!({MetricStore, config})
+
+      MetricStore.write_metric(@name, metric, 1, %{})
+
+      # first gen don't get deleted if the threshold were not violated yet
+
+      induce_rotate_generation()
+
+      refute MetricStore.get_metrics(@name, 0) == %{}
+
+      # gets deleted at rotation when threshold was violated
+
+      MetricStore.write_metric(@name, metric, 1, %{})
+
+      induce_rotate_generation()
+
+      assert MetricStore.get_metrics(@name, 0) == %{}
+      refute MetricStore.get_metrics(@name, 1) == %{}
+    end
+
+    test "deletes older generations until threshold is respected", %{store_config: base_config, metric: metric} do
+      config = Map.put(base_config, :max_table_memory, 3800)
+      start_supervised!({MetricStore, config})
+
+      # create multiple lightweight generations
+
+      MetricStore.write_metric(@name, metric, 1, %{"test" => 1})
+      induce_rotate_generation()
+
+      MetricStore.write_metric(@name, metric, 1,  %{"test" => 1})
+      induce_rotate_generation()
+
+      MetricStore.write_metric(@name, metric, 1,  %{"test" => 1})
+      induce_rotate_generation()
+
+      MetricStore.write_metric(@name, metric, 1,  %{"test" => 1})
+      induce_rotate_generation()
+
+      # make one generation with lots of metrics to force deleting multiple lightier ones
+
+      MetricStore.write_metric(@name, metric, 1,  %{"test" => 1})
+      MetricStore.write_metric(@name, metric, 1,  %{"test" => 2})
+      MetricStore.write_metric(@name, metric, 1,  %{"test" => 3})
+
+      # drop until meeting threshold again
+
+      induce_rotate_generation()
+
+      assert MetricStore.get_metrics(@name, 0) == %{}
+      assert MetricStore.get_metrics(@name, 1) == %{}
+      assert MetricStore.get_metrics(@name, 2) == %{}
+
+      refute MetricStore.get_metrics(@name, 3) == %{}
+      refute MetricStore.get_metrics(@name, 4) == %{}
+    end
+
+    test "threshold violation don't delete current generation when there is no older ones", %{store_config: base_config, metric: metric} do
+      config = Map.put(base_config, :max_table_memory, 1)
+      start_supervised!({MetricStore, config})
+
+      MetricStore.write_metric(@name, metric, 1, %{"test" => 1})
+
+      refute MetricStore.get_metrics(@name, 0) == %{}
+    end
+  end
+
   describe "export flow" do
     test "exports all metrics in protobuf format", %{bypass: bypass, store_config: config} do
       metric1 = Metrics.sum("test.sum")

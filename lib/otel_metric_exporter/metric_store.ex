@@ -194,17 +194,35 @@ defmodule OtelMetricExporter.MetricStore do
 
     :ets.insert(state.generations_table, {current_gen + 1, System.system_time(:nanosecond), nil})
 
+    trim_metrics_table(state)
+
     current_gen
+  end
+
+  defp trim_metrics_table(state) do
+    if above_memory_limit?(state) do
+      earliest_gen = earliest_gen(state.generations_table)
+      current_gen = :persistent_term.get(generation_key(state.metrics_table))
+      previous_gen = current_gen - 1
+
+      earliest_gen..previous_gen
+      |> Enum.take_while(fn gen ->
+        clear_generations(state, gen..gen)
+
+        above_memory_limit?(state)
+      end)
+    end
+  end
+
+  defp above_memory_limit?(state) do
+    memory_size = :ets.info(state.metrics_table, :memory) * :erlang.system_info(:wordsize)
+    memory_size > state.api.config.max_table_memory
   end
 
   defp export_metrics(%State{} = state) do
     current_gen = rotate_generation(state)
 
-    earliest_gen =
-      case :ets.first(state.generations_table) do
-        :"$end_of_table" -> 0
-        x -> x
-      end
+    earliest_gen = earliest_gen(state.generations_table)
 
     metrics =
       earliest_gen..current_gen//1
@@ -257,6 +275,13 @@ defmodule OtelMetricExporter.MetricStore do
 
       log_failures(batch_results)
       {:error, :partial_failure}
+    end
+  end
+
+  defp earliest_gen(generations_table) do
+    case :ets.first(generations_table) do
+      :"$end_of_table" -> 0
+      x -> x
     end
   end
 
