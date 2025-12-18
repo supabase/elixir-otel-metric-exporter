@@ -93,13 +93,15 @@ defmodule OtelMetricExporter.OtelApi.Config do
     ],
     max_concurrency: [
       type: :pos_integer,
-      default: 3,
-      doc: "Maximum number of concurrent batch exports."
+      default: System.schedulers_online(),
+      doc:
+        "Maximum number of concurrent batch exports. Defaults to the number of schedulers online."
     ],
     max_table_memory: [
       type: :pos_integer,
       default: 2_000_000_000,
-      doc: "Soft limit for metrics ETS table memory usage. Deletes old generations when surpassed."
+      doc:
+        "Soft limit for metrics ETS table memory usage. Deletes old generations when surpassed."
     ],
     resource: [
       type: {:map, {:or, [:atom, :string]}, :any},

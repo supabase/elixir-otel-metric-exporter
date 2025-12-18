@@ -244,7 +244,7 @@ defmodule OtelMetricExporter.MetricStore do
         convert_metric(metric, List.flatten(grouped_values))
       end)
 
-    max_concurrency = Map.get(state.api.config, :max_concurrency, 3)
+    max_concurrency = Map.get(state.api.config, :max_concurrency, System.schedulers_online())
 
     batch_results =
       metrics
@@ -253,7 +253,8 @@ defmodule OtelMetricExporter.MetricStore do
       |> Task.async_stream(
         fn {batch, idx} -> {idx, batch, OtelApi.send_metrics(state.api, batch)} end,
         max_concurrency: max_concurrency,
-        timeout: 60_000
+        timeout: 60_000,
+        on_timeout: :kill_task
       )
       |> Enum.to_list()
 
