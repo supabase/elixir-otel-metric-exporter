@@ -141,7 +141,7 @@ defmodule OtelMetricExporter.MetricStore do
     Process.send_after(self(), :export, config.export_period)
 
     # Create ETS table for metrics
-    :ets.new(metrics_table, [:ordered_set, :public, :named_table, {:write_concurrency, true}])
+    :ets.new(metrics_table, [:ordered_set, :public, :named_table, {:write_concurrency, :auto}])
 
     generations_table = :ets.new(:generations, [:ordered_set, :private])
     :ets.insert(generations_table, {0, System.system_time(:nanosecond), 0})
