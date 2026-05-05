@@ -27,3 +27,6 @@ otel_metric_exporter-*.tar
 
 # windsurf rules
 .windsurfrules
+
+# Benchee saved baselines from bench/ scripts
+/bench/.benchee/
