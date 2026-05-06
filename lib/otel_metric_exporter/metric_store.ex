@@ -221,29 +221,53 @@ defmodule OtelMetricExporter.MetricStore do
 
   defp export_metrics(%State{} = state) do
     current_gen = rotate_generation(state)
-
     earliest_gen = earliest_gen(state.generations_table)
+    metrics = collect_metrics(state, earliest_gen, current_gen)
 
-    metrics =
-      earliest_gen..current_gen//1
-      |> Enum.flat_map(fn gen ->
-        {_, start, finish} =
-          List.first(:ets.lookup(state.generations_table, gen), {nil, nil, nil})
+    if is_function(state.api.config.export_callback) do
+      export_metrics_callback(state, metrics, earliest_gen, current_gen)
+    else
+      export_metrics_http(state, metrics, earliest_gen, current_gen)
+    end
+  end
 
-        get_metrics(state.metrics_table, gen)
-        |> Enum.map(fn {key, values} ->
-          tagged_values = Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)
-          {key, tagged_values}
-        end)
+  defp collect_metrics(%State{} = state, earliest_gen, current_gen) do
+    earliest_gen..current_gen//1
+    |> Enum.flat_map(fn gen ->
+      {_, start, finish} =
+        List.first(:ets.lookup(state.generations_table, gen), {nil, nil, nil})
+
+      get_metrics(state.metrics_table, gen)
+      |> Enum.map(fn {key, values} ->
+        tagged_values = Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)
+        {key, tagged_values}
       end)
-      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-      |> Enum.map(fn {{type, name}, grouped_values} ->
-        metric =
-          Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.map(fn {{type, name}, grouped_values} ->
+      metric =
+        Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
 
-        convert_metric(metric, List.flatten(grouped_values))
-      end)
+      convert_metric(metric, List.flatten(grouped_values))
+    end)
+  end
 
+  defp export_metrics_callback(state, metrics, earliest_gen, current_gen) do
+    case OtelApi.send_metrics(state.api, metrics) do
+      :ok ->
+        if metrics != [] do
+          clear_generations(state, earliest_gen..current_gen//1)
+        end
+
+        :ok
+
+      {:error, reason} = err ->
+        Logger.error("Failed to export metrics via callback: #{inspect(reason)}")
+        err
+    end
+  end
+
+  defp export_metrics_http(state, metrics, earliest_gen, current_gen) do
     max_concurrency = Map.get(state.api.config, :max_concurrency, System.schedulers_online())
 
     batch_results =
