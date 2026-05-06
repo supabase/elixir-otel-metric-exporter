@@ -1,4 +1,8 @@
-# Run with: mix run bench/write_path_bench.exs
+# Run with: BENCH_TAG=<label> mix run bench/write_path_bench.exs
+#
+# Saves results to bench/.benchee/write_path.<tag>. Any existing files matching
+# bench/.benchee/write_path.* are loaded for cross-run comparison. Defaults to
+# the tag "current" if BENCH_TAG is unset.
 
 Code.require_file("support.exs", __DIR__)
 
@@ -91,12 +95,22 @@ job = fn {_state, metric_config, event_name, measurements, metadata} ->
   OtelMetricExporter.handle_metric(event_name, measurements, metadata, metric_config)
 end
 
+tag = System.get_env("BENCH_TAG", "current")
+save_path = "bench/.benchee/write_path.#{tag}"
+
+prior_runs =
+  "bench/.benchee/write_path.*"
+  |> Path.wildcard()
+  |> Enum.reject(&(&1 == save_path))
+
 Benchee.run(
   %{"handle_metric" => job},
   inputs: inputs,
   time: 5,
   warmup: 2,
-  print: [fast_warning: false]
+  print: [fast_warning: false],
+  load: prior_runs,
+  save: [path: save_path, tag: tag]
 )
 
 # Cleanup

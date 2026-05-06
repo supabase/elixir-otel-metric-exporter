@@ -1,4 +1,8 @@
-# Run with: mix run bench/export_path_bench.exs
+# Run with: BENCH_TAG=<label> mix run bench/export_path_bench.exs
+#
+# Saves results to bench/.benchee/export_path.<tag>. Any existing files matching
+# bench/.benchee/export_path.* are loaded for cross-run comparison. Defaults to
+# the tag "current" if BENCH_TAG is unset.
 
 Code.require_file("support.exs", __DIR__)
 
@@ -84,6 +88,14 @@ job = fn state ->
   :ok
 end
 
+tag = System.get_env("BENCH_TAG", "current")
+save_path = "bench/.benchee/export_path.#{tag}"
+
+prior_runs =
+  "bench/.benchee/export_path.*"
+  |> Path.wildcard()
+  |> Enum.reject(&(&1 == save_path))
+
 Benchee.run(
   %{"export_sync" => job},
   inputs: inputs,
@@ -91,7 +103,8 @@ Benchee.run(
   time: 8,
   warmup: 2,
   print: [fast_warning: false],
-  save: [path: "bench/.benchee/export_path", tag: "baseline-pre-step1"]
+  load: prior_runs,
+  save: [path: save_path, tag: tag]
 )
 
 for {_label, state} <- inputs do
