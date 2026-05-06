@@ -121,8 +121,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
 
     defp induce_rotate_generation do
       capture_log(fn ->
-        send(@name, :export)
-        :timer.sleep(100)
+        MetricStore.export_sync(@name)
       end)
     end
 
@@ -155,7 +154,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       store_config: base_config,
       metric: metric
     } do
-      config = Map.put(base_config, :max_table_memory, 3800)
+      config = Map.put(base_config, :max_table_memory, 3600)
       start_supervised!({MetricStore, config})
 
       # create multiple lightweight generations
