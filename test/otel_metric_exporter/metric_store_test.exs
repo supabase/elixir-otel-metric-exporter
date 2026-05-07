@@ -411,4 +411,84 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert map_size(MetricStore.get_metrics(@name, 0)) == 10
     end
   end
+
+  describe "callback export" do
+    test "ignores max_batch_size", %{
+      store_config: config
+    } do
+      metrics = Enum.map(1..8, &Metrics.counter("test.counter.#{&1}"))
+      test_pid = self()
+
+      callback = fn payload, _config ->
+        send(test_pid, payload)
+        :ok
+      end
+
+      config =
+        Map.merge(config, %{export_callback: callback, metrics: metrics, max_batch_size: 5})
+
+      start_supervised!({MetricStore, config})
+
+      Enum.each(metrics, &MetricStore.write_metric(@name, &1, 1, %{}))
+
+      assert :ok = MetricStore.export_sync(@name)
+
+      assert_received {:metrics, all_metrics}
+      assert length(all_metrics) == 8
+      refute_received {:metrics, _all_metrics}
+    end
+
+    test "successful callback clears generations from metrics_table", %{store_config: config} do
+      metric = Metrics.sum("test.sum")
+      tags = %{test: "value"}
+      test_pid = self()
+
+      callback = fn payload, _config ->
+        send(test_pid, payload)
+        :ok
+      end
+
+      start_supervised!(
+        {MetricStore, Map.merge(config, %{export_callback: callback, metrics: [metric]})}
+      )
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+      MetricStore.write_metric(@name, metric, 2, tags)
+
+      # Confirm there's data before
+      assert %{{:sum, "test.sum"} => %{^tags => 3}} = MetricStore.get_metrics(@name, 0)
+
+      assert :ok = MetricStore.export_sync(@name)
+
+      # Both generation 0 (drained) is cleared
+      assert MetricStore.get_metrics(@name, 0) == %{}
+    end
+  end
+
+  test "returns error", %{store_config: config} do
+    metric = Metrics.sum("test.sum")
+    tags = %{test: "value"}
+
+    callback = fn _payload, _config ->
+      {:error, :failed}
+    end
+
+    config =
+      Map.merge(config, %{export_callback: callback, metrics: [metric]})
+
+    start_supervised!({MetricStore, config})
+
+    MetricStore.write_metric(@name, metric, 1, tags)
+    MetricStore.write_metric(@name, metric, 2, tags)
+
+    log =
+      capture_log(fn ->
+        assert {:error, :failed} = MetricStore.export_sync(@name)
+      end)
+
+    assert log =~ ":failed"
+
+    # Metrics are retained across all generations (gen 0 contained the writes)
+    assert %{{:sum, "test.sum"} => %{^tags => 3}} = MetricStore.get_metrics(@name, 0)
+  end
 end

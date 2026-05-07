@@ -144,15 +144,9 @@ defmodule OtelMetricExporter.OtelApi do
   defp maybe_compress(body, _), do: body
 
   defp execute_export_callback(batch, type, config) do
-    try do
-      case config.export_callback.({type, batch}, config) do
-        {:error, _} = error -> error
-        _ -> :ok
-      end
-    rescue
-      e -> {:error, {:callback_raised, :error, e, __STACKTRACE__}}
-    catch
-      kind, reason -> {:error, {:callback_raised, kind, reason, __STACKTRACE__}}
+    case config.export_callback.({type, batch}, config) do
+      {:error, _} = error -> error
+      _ -> :ok
     end
   end
 end
