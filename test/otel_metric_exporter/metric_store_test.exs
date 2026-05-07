@@ -257,7 +257,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       metrics = MetricStore.get_metrics(@name)
 
       # Export metrics synchronously
-      assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export batch"
+      assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export metrics"
 
       # Verify metrics were not cleared due to error
       assert MetricStore.get_metrics(@name, 0) == metrics
@@ -275,7 +275,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       metrics = MetricStore.get_metrics(@name)
 
       # Export metrics synchronously
-      assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export batch"
+      assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export metrics"
 
       # Verify metrics were not cleared due to error
       assert MetricStore.get_metrics(@name, 0) == metrics
@@ -327,93 +327,50 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert MetricStore.get_metrics(@name, 1) == %{}
     end
 
-    test "splits large metric sets into batches", %{bypass: bypass, store_config: config} do
-      metrics = Enum.map(1..60, &Metrics.counter("test.counter.#{&1}"))
-      start_supervised!({MetricStore, Map.merge(config, %{metrics: metrics, max_batch_size: 50})})
+    test "clears all metrics on successful HTTP export", %{bypass: bypass, store_config: config} do
+      metric1 = Metrics.counter("test.counter.1")
+      metric2 = Metrics.counter("test.counter.2")
+      start_supervised!({MetricStore, %{config | metrics: [metric1, metric2]}})
 
-      Enum.each(metrics, &MetricStore.write_metric(@name, &1, 1, %{}))
-
-      {:ok, agent} = Agent.start_link(fn -> [] end)
-
-      Bypass.expect(bypass, "POST", "/v1/metrics", fn conn ->
-        {:ok, body, _} = Plug.Conn.read_body(conn)
-
-        [%{scope_metrics: [%{metrics: batch}]}] =
-          ExportMetricsServiceRequest.decode(body).resource_metrics
-
-        Agent.update(agent, &[length(batch) | &1])
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
         Plug.Conn.resp(conn, 200, "")
       end)
 
-      assert :ok = MetricStore.export_sync(@name)
-      assert MetricStore.get_metrics(@name, 0) == %{}
-      assert Agent.get(agent, & &1) |> Enum.sort() == [10, 50]
-    end
-
-    test "splits large metric data points into smaller sets", %{
-      bypass: bypass,
-      store_config: config
-    } do
-      metrics =
-        Enum.map(1..60, fn _ -> Metrics.last_value("test.counter.1", tags: [:my_field]) end)
-
-      start_supervised!({MetricStore, Map.merge(config, %{metrics: metrics, max_batch_size: 50})})
-
-      Enum.each(
-        metrics,
-        &MetricStore.write_metric(@name, &1, 1, %{my_field: "counter_#{:rand.uniform(100_000)}"})
-      )
-
-      {:ok, agent} = Agent.start_link(fn -> [] end)
-
-      Bypass.expect(bypass, "POST", "/v1/metrics", fn conn ->
-        {:ok, body, _} = Plug.Conn.read_body(conn)
-
-        [%{scope_metrics: [%{metrics: [%{data: {:gauge, %{data_points: data_points}}}]}]}] =
-          ExportMetricsServiceRequest.decode(body).resource_metrics
-
-        Agent.update(agent, &[length(data_points) | &1])
-        Plug.Conn.resp(conn, 200, "")
-      end)
+      MetricStore.write_metric(@name, metric1, 1, %{})
+      MetricStore.write_metric(@name, metric2, 1, %{})
 
       assert :ok = MetricStore.export_sync(@name)
-      assert MetricStore.get_metrics(@name, 0) == %{}
 
-      for v <- Agent.get(agent, & &1) do
-        assert v <= 50
-      end
+      # All metrics cleared after successful export
+      assert MetricStore.get_metrics(@name, 0) == %{}
     end
 
-    test "retains only failed batch metrics", %{bypass: bypass, store_config: config} do
-      metrics = Enum.map(1..60, &Metrics.counter("test.counter.#{&1}"))
-      start_supervised!({MetricStore, Map.merge(config, %{metrics: metrics, max_batch_size: 50})})
+    test "retains all metrics on HTTP server error", %{bypass: bypass, store_config: config} do
+      metric1 = Metrics.counter("test.counter.1")
+      metric2 = Metrics.counter("test.counter.2")
+      tags = %{test: "value"}
+      start_supervised!({MetricStore, %{config | metrics: [metric1, metric2]}})
 
-      Enum.each(metrics, &MetricStore.write_metric(@name, &1, 1, %{}))
+      MetricStore.write_metric(@name, metric1, 1, tags)
+      MetricStore.write_metric(@name, metric2, 1, tags)
 
-      Bypass.expect(bypass, "POST", "/v1/metrics", fn conn ->
-        {:ok, body, _} = Plug.Conn.read_body(conn)
+      metrics_before = MetricStore.get_metrics(@name, 0)
 
-        [%{scope_metrics: [%{metrics: batch}]}] =
-          ExportMetricsServiceRequest.decode(body).resource_metrics
-
-        status = if length(batch) == 50, do: 200, else: 500
-        Plug.Conn.resp(conn, status, "")
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
+        Plug.Conn.resp(conn, 500, "Internal Server Error")
       end)
 
-      :timer.sleep(500)
+      log = capture_log(fn -> assert {:error, _} = MetricStore.export_sync(@name) end)
 
-      log =
-        capture_log(fn -> assert {:error, :partial_failure} = MetricStore.export_sync(@name) end)
+      assert log =~ "Failed to export metrics"
 
-      assert log =~ "Failed to export batch"
-
-      # First batch (50 metrics) succeeds and is cleared, second batch (10 metrics) fails and is retained
-      assert map_size(MetricStore.get_metrics(@name, 0)) == 10
+      # All metrics retained on failure (all-or-nothing semantics)
+      assert MetricStore.get_metrics(@name, 0) == metrics_before
     end
   end
 
   describe "callback export" do
-    test "ignores max_batch_size", %{
+    test "callback is invoked exactly once with the full metric list", %{
       store_config: config
     } do
       metrics = Enum.map(1..8, &Metrics.counter("test.counter.#{&1}"))
@@ -425,7 +382,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       end
 
       config =
-        Map.merge(config, %{export_callback: callback, metrics: metrics, max_batch_size: 5})
+        Map.merge(config, %{export_callback: callback, metrics: metrics})
 
       start_supervised!({MetricStore, config})
 
