@@ -22,6 +22,8 @@ defmodule OtelMetricExporter.MetricStore do
 
   @default_buckets [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
 
+  @current_gen_idx 1
+
   defmodule State do
     @moduledoc false
     defstruct [:config, :api, :metrics, :metrics_table, :last_export, :generations_table]
@@ -53,7 +55,7 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   def get_metrics(metrics_table, generation \\ nil) do
-    generation = generation || :persistent_term.get(generation_key(metrics_table))
+    generation = generation || get_current_gen(metrics_table)
 
     :ets.match_object(metrics_table, {{generation, :_, :_, :_, :_}, :_, :_})
     |> Enum.reduce(%{}, fn
@@ -94,28 +96,28 @@ defmodule OtelMetricExporter.MetricStore do
     do: write_metric(metrics_table, metric, Enum.join(metric.name, "."), value, tags)
 
   def write_metric(metrics_table, %Metrics.Counter{} = metric, string_name, _, tags) do
-    generation = :persistent_term.get(generation_key(metrics_table))
+    generation = get_current_gen(metrics_table)
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
     :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
   end
 
   def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
-    generation = :persistent_term.get(generation_key(metrics_table))
+    generation = get_current_gen(metrics_table)
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
     :ets.update_counter(metrics_table, ets_key, value, {ets_key, 0, nil})
   end
 
   def write_metric(metrics_table, %Metrics.LastValue{} = metric, string_name, value, tags) do
-    generation = :persistent_term.get(generation_key(metrics_table))
+    generation = get_current_gen(metrics_table)
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
     :ets.update_element(metrics_table, ets_key, {2, value}, {ets_key, value, nil})
   end
 
   def write_metric(metrics_table, %Metrics.Distribution{} = metric, string_name, value, tags) do
     bucket = find_bucket(metric, value)
-    generation = :persistent_term.get(generation_key(metrics_table))
+    generation = get_current_gen(metrics_table)
     ets_key = {generation, string_name, metric_type(metric), tags, bucket}
     update_counter_op = {2, 1}
     update_sum_op = {3, round(value)}
@@ -152,7 +154,8 @@ defmodule OtelMetricExporter.MetricStore do
 
     generations_table = :ets.new(:generations, [:ordered_set, :private])
     :ets.insert(generations_table, {0, System.system_time(:nanosecond), 0})
-    :persistent_term.put(generation_key(metrics_table), 0)
+    generation_counter = :atomics.new(1, signed: false)
+    :persistent_term.put(generation_key(metrics_table), generation_counter)
 
     with {:ok, api, config} <- OtelApi.new(Map.put(config, :finch, finch_pool), :metrics) do
       {:ok,
@@ -205,26 +208,25 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   defp rotate_generation(%State{} = state) do
-    current_gen = :persistent_term.get(generation_key(state.metrics_table))
-    :persistent_term.put(generation_key(state.metrics_table), current_gen + 1)
+    {old_gen, new_gen} = bump_gen_counter(state.metrics_table)
 
     :ets.update_element(
       state.generations_table,
-      current_gen,
+      old_gen,
       {3, System.system_time(:nanosecond)}
     )
 
-    :ets.insert(state.generations_table, {current_gen + 1, System.system_time(:nanosecond), nil})
+    :ets.insert(state.generations_table, {new_gen, System.system_time(:nanosecond), nil})
 
     trim_metrics_table(state)
 
-    current_gen
+    old_gen
   end
 
   defp trim_metrics_table(state) do
     if above_memory_limit?(state) do
       earliest_gen = earliest_gen(state.generations_table)
-      current_gen = :persistent_term.get(generation_key(state.metrics_table))
+      current_gen = get_current_gen(state.metrics_table)
       previous_gen = current_gen - 1
 
       earliest_gen..previous_gen
@@ -394,6 +396,16 @@ defmodule OtelMetricExporter.MetricStore do
       :ets.match_delete(state.metrics_table, {{gen, :_, :_, :_, :_}, :_, :_})
       :ets.delete(state.generations_table, gen)
     end
+  end
+
+  defp get_current_gen(table) do
+    counters = :persistent_term.get(generation_key(table))
+    :atomics.get(counters, @current_gen_idx)
+  end
+
+  defp bump_gen_counter(table) do
+    counters = :persistent_term.get(generation_key(table))
+    {:atomics.get(counters, @current_gen_idx), :atomics.add_get(counters, @current_gen_idx, 1)}
   end
 
   defp generation_key(metrics_table) do
