@@ -224,16 +224,34 @@ defmodule OtelMetricExporter.MetricStore do
     earliest_gen = earliest_gen(state.generations_table)
     metrics = collect_metrics(state, earliest_gen, current_gen)
 
-    case OtelApi.send_metrics(state.api, metrics) do
+    case send_metrics(state.api, metrics) do
       :ok ->
         if metrics != [], do: clear_generations(state, earliest_gen..current_gen//1)
         :ok
 
       {:error, reason} = err ->
-        Logger.error("Failed to export metrics: #{inspect(reason)}")
+        Logger.error("Failed to export metrics: #{format_export_error(reason)}")
         err
     end
   end
+
+  defp send_metrics(api, metrics) do
+    OtelApi.send_metrics(api, metrics)
+  rescue
+    exception ->
+      {:error, {:exception, exception, __STACKTRACE__}}
+  catch
+    kind, reason ->
+      {:error, {kind, reason, __STACKTRACE__}}
+  end
+
+  defp format_export_error({kind, reason, stacktrace}) when kind in [:throw, :exit, :error],
+    do: Exception.format(kind, reason, stacktrace)
+
+  defp format_export_error({:exception, exception, stacktrace}),
+    do: Exception.format(:error, exception, stacktrace)
+
+  defp format_export_error(reason), do: inspect(reason)
 
   defp collect_metrics(%State{} = state, earliest_gen, current_gen) do
     earliest_gen..current_gen//1
