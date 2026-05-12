@@ -243,6 +243,37 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert MetricStore.get_metrics(@name, 0) == %{}
     end
 
+    test "exports metrics with arbitrary Elixir terms in tags", %{
+      bypass: bypass,
+      store_config: config
+    } do
+      metric = Metrics.sum("test.sum")
+      start_supervised!({MetricStore, %{config | metrics: [metric]}})
+
+      tags = %{
+        {:tuple, :key} => {:tuple, self()},
+        nested: %{self() => MapSet.new([:a])}
+      }
+
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        request = ExportMetricsServiceRequest.decode(body)
+        assert [%{scope_metrics: [%{metrics: [metric]}]}] = request.resource_metrics
+        assert {:sum, %{data_points: [%{attributes: attributes}]}} = metric.data
+
+        attribute_keys = Enum.map(attributes, & &1.key)
+        assert inspect({:tuple, :key}) in attribute_keys
+        assert Enum.any?(attribute_keys, &String.starts_with?(&1, "nested.#PID<"))
+
+        Plug.Conn.resp(conn, 200, "")
+      end)
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+
+      assert :ok = MetricStore.export_sync(@name)
+    end
+
     test "handles server errors gracefully", %{bypass: bypass, store_config: config} do
       metric = Metrics.sum("test.sum")
       tags = %{test: "value"}
@@ -260,6 +291,24 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export metrics"
 
       # Verify metrics were not cleared due to error
+      assert MetricStore.get_metrics(@name, 0) == metrics
+    end
+
+    test "handles protobuf encoding errors gracefully", %{store_config: config} do
+      metric = Metrics.last_value("test.last_value")
+      tags = %{test: "value"}
+      start_supervised!({MetricStore, %{config | metrics: [metric]}})
+
+      MetricStore.write_metric(@name, metric, :not_a_number, tags)
+      metrics = MetricStore.get_metrics(@name)
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:exception, _exception, _stacktrace}} = MetricStore.export_sync(@name)
+        end)
+
+      assert log =~ "Failed to export metrics"
+      assert Process.alive?(Process.whereis(@name))
       assert MetricStore.get_metrics(@name, 0) == metrics
     end
 

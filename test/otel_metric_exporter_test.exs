@@ -164,6 +164,40 @@ defmodule OtelMetricExporterTest do
              ]) == 1
     end
 
+    test "does not detach handler when recording a metric raises" do
+      event_name = [:test, :bad_metric]
+
+      metrics = [
+        Telemetry.Metrics.sum(
+          "test.bad_metric.value",
+          event_name: event_name,
+          measurement: fn
+            _measurements, %{bad?: true} -> raise "bad telemetry payload"
+            measurements, _metadata -> measurements.value
+          end
+        )
+      ]
+
+      start_supervised!({OtelMetricExporter, @base_config ++ [metrics: metrics]})
+
+      handler_id = {OtelMetricExporter.TelemetryHandlers, @name, event_name}
+
+      log =
+        capture_log(fn ->
+          :telemetry.execute(event_name, %{value: 1}, %{bad?: true})
+          Process.sleep(50)
+        end)
+
+      assert log =~ "Failed to record telemetry metric"
+      assert Enum.any?(:telemetry.list_handlers(event_name), &(&1.id == handler_id))
+
+      :telemetry.execute(event_name, %{value: 2}, %{})
+      Process.sleep(50)
+
+      metrics = OtelMetricExporter.MetricStore.get_metrics(@name)
+      assert get_in(metrics, [{:sum, "test.bad_metric.value"}, %{}]) == 2
+    end
+
     test "handles detaching of handlers on shutdown" do
       test_event = :"event_#{inspect(self())}"
 

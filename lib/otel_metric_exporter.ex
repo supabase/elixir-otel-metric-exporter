@@ -137,21 +137,29 @@ defmodule OtelMetricExporter do
 
   @doc false
   def handle_metric(_event_name, measurements, metadata, %{metrics: metrics, name: name} = config) do
-    for metric <- metrics do
-      if is_nil(metric.keep) || metric.keep.(metadata) do
-        value = extract_measurement(metric, measurements, metadata)
+    Enum.each(metrics, &handle_single_metric(&1, measurements, metadata, name, config))
+  end
 
-        tags =
-          if extract_fn = config[:extract_tags] do
-            extract_fn.(metric, metadata)
-          else
-            extract_tags(metric, metadata)
-          end
+  defp handle_single_metric(metric, measurements, metadata, name, config) do
+    if is_nil(metric.keep) || metric.keep.(metadata) do
+      value = extract_measurement(metric, measurements, metadata)
 
-        metric_name = "#{Enum.join(metric.name, ".")}"
-        MetricStore.write_metric(name, metric, metric_name, value, tags)
-      end
+      tags =
+        if extract_fn = config[:extract_tags] do
+          extract_fn.(metric, metadata)
+        else
+          extract_tags(metric, metadata)
+        end
+
+      metric_name = "#{Enum.join(metric.name, ".")}"
+      MetricStore.write_metric(name, metric, metric_name, value, tags)
     end
+  rescue
+    exception ->
+      log_metric_error(metric, {:error, exception, __STACKTRACE__})
+  catch
+    kind, reason ->
+      log_metric_error(metric, {kind, reason, __STACKTRACE__})
   end
 
   defp extract_measurement(metric, measurements, metadata) do
@@ -166,5 +174,11 @@ defmodule OtelMetricExporter do
     metadata
     |> metric.tag_values.()
     |> Map.take(metric.tags)
+  end
+
+  defp log_metric_error(metric, {kind, reason, stacktrace}) do
+    Logger.warning(
+      "Failed to record telemetry metric #{inspect(metric.name)}: #{Exception.format(kind, reason, stacktrace)}"
+    )
   end
 end
