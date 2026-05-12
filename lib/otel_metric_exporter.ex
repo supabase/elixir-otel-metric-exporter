@@ -1,6 +1,7 @@
 defmodule OtelMetricExporter do
   use Supervisor
   require Logger
+  alias OtelMetricExporter.HandlerConfig
   alias OtelMetricExporter.OtelApi
   alias OtelMetricExporter.MetricStore
   alias OtelMetricExporter.TelemetryHandlers
@@ -63,6 +64,18 @@ defmodule OtelMetricExporter do
                         default: :otel_metric_exporter,
                         doc:
                           "If you require multiple exporters, give each exporter a unique name."
+                      ],
+                      storage: [
+                        type: {:in, [:ets, :striped]},
+                        default: :ets,
+                        doc:
+                          "Metrics storage backend. `:ets` uses one ETS table; `:striped` uses one ETS table per scheduler."
+                      ],
+                      distribution_storage: [
+                        type: {:in, [:ets, :atomics]},
+                        default: :ets,
+                        doc:
+                          "Distribution bucket storage. `:ets` uses ETS counters; `:atomics` uses atomics referenced from ETS."
                       ],
                       extract_tags: [
                         type: {:or, [{:fun, 2}, nil]},
@@ -136,10 +149,20 @@ defmodule OtelMetricExporter do
   end
 
   @doc false
+  def handle_metric(
+        _event_name,
+        measurements,
+        metadata,
+        %{metrics: metrics, tag_fns: tag_fns, name: name}
+      ) do
+    tag_results = compute_tags(tag_fns, metadata)
+    store_compiled_metrics(metrics, measurements, metadata, name, tag_results)
+  end
+
   def handle_metric(_event_name, measurements, metadata, %{metrics: metrics, name: name} = config) do
     for metric <- metrics do
       if is_nil(metric.keep) || metric.keep.(metadata) do
-        value = extract_measurement(metric, measurements, metadata)
+        value = extract_measurement(metric.measurement, measurements, metadata)
 
         tags =
           if extract_fn = config[:extract_tags] do
@@ -148,14 +171,52 @@ defmodule OtelMetricExporter do
             extract_tags(metric, metadata)
           end
 
-        metric_name = "#{Enum.join(metric.name, ".")}"
-        MetricStore.write_metric(name, metric, metric_name, value, tags)
+        if metric_type(metric) == :counter or is_number(value) do
+          metric_name = "#{Enum.join(metric.name, ".")}"
+          MetricStore.write_metric(name, metric, metric_name, value, tags)
+        end
       end
     end
   end
 
-  defp extract_measurement(metric, measurements, metadata) do
-    case metric.measurement do
+  defp store_compiled_metrics([], _measurements, _metadata, _name, _tag_results), do: :ok
+
+  defp store_compiled_metrics(
+         [%HandlerConfig.Metric{} = metric | rest],
+         measurements,
+         metadata,
+         name,
+         tag_results
+       ) do
+    if is_nil(metric.keep) || metric.keep.(metadata) do
+      value = extract_measurement(metric.measurement, measurements, metadata)
+
+      if metric.type == :counter or is_number(value) do
+        MetricStore.write_metric(
+          name,
+          metric.metric,
+          metric.id,
+          value,
+          elem(tag_results, metric.tag_idx)
+        )
+      end
+    end
+
+    store_compiled_metrics(rest, measurements, metadata, name, tag_results)
+  end
+
+  defp compute_tags(tag_fns, metadata) do
+    compute_tags(tag_fns, metadata, tuple_size(tag_fns) - 1, [])
+  end
+
+  defp compute_tags(_tag_fns, _metadata, -1, acc), do: List.to_tuple(acc)
+
+  defp compute_tags(tag_fns, metadata, idx, acc) do
+    compute_tags(tag_fns, metadata, idx - 1, [elem(tag_fns, idx).(metadata) | acc])
+  end
+
+  defp extract_measurement(measurement, measurements, metadata) do
+    case measurement do
       fun when is_function(fun, 1) -> fun.(measurements)
       fun when is_function(fun, 2) -> fun.(measurements, metadata)
       key -> Map.get(measurements, key)
@@ -167,4 +228,9 @@ defmodule OtelMetricExporter do
     |> metric.tag_values.()
     |> Map.take(metric.tags)
   end
+
+  defp metric_type(%Metrics.Counter{}), do: :counter
+  defp metric_type(%Metrics.Sum{}), do: :sum
+  defp metric_type(%Metrics.LastValue{}), do: :last_value
+  defp metric_type(%Metrics.Distribution{}), do: :distribution
 end

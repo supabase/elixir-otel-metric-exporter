@@ -8,6 +8,8 @@ defmodule OtelMetricExporter.TelemetryHandlers do
   # but this way we keep the handler ids around.
   use GenServer
 
+  alias OtelMetricExporter.HandlerConfig
+
   def name(%{name: stack_name}), do: :"#{stack_name}:TelemetryHandlers"
 
   def start_link(config) do
@@ -45,7 +47,7 @@ defmodule OtelMetricExporter.TelemetryHandlers do
         handler_id,
         event_name,
         &OtelMetricExporter.handle_metric/4,
-        %{metrics: metrics, name: config.name, extract_tags: config[:extract_tags]}
+        HandlerConfig.compile(metrics, config)
       )
 
       handler_id

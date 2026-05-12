@@ -104,6 +104,61 @@ defmodule OtelMetricExporter.MetricStoreTest do
     end
   end
 
+  describe "storage variants" do
+    test "records metrics in striped ETS storage", %{store_config: base_config} do
+      metric = Metrics.sum("test.striped.value")
+      name = :metric_store_striped_test
+
+      config =
+        Map.merge(base_config, %{
+          name: name,
+          metrics: [metric],
+          storage: :striped
+        })
+
+      start_supervised!({MetricStore, config})
+
+      MetricStore.write_metric(name, metric, 1, %{})
+      MetricStore.write_metric(name, metric, 2, %{})
+
+      assert %{{:sum, "test.striped.value"} => %{%{} => 3}} = MetricStore.get_metrics(name)
+    end
+
+    test "exports atomics-backed distribution metrics", %{store_config: base_config} do
+      metric =
+        Metrics.distribution("test.atomics.distribution", reporter_options: [buckets: [2, 4]])
+
+      name = :metric_store_atomics_test
+      test_pid = self()
+
+      callback = fn payload, _config ->
+        send(test_pid, payload)
+        :ok
+      end
+
+      config =
+        Map.merge(base_config, %{
+          name: name,
+          metrics: [metric],
+          distribution_storage: :atomics,
+          export_callback: callback
+        })
+
+      start_supervised!({MetricStore, config})
+
+      MetricStore.write_metric(name, metric, 2, %{})
+      MetricStore.write_metric(name, metric, 5, %{})
+
+      assert :ok = MetricStore.export_sync(name)
+
+      assert_received {:metrics, [exported]}
+      assert {:histogram, %{data_points: [point]}} = exported.data
+      assert point.count == 2
+      assert point.sum == 7
+      assert point.bucket_counts == [1, 0, 1]
+    end
+  end
+
   describe "limit memory usage" do
     setup %{bypass: bypass, store_config: base_config} do
       Bypass.stub(
