@@ -76,8 +76,13 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
+  @spec export_sync(term()) :: :ok | {:error, term()}
   def export_sync(name) do
     GenServer.call(name, :export_sync, :infinity)
+  end
+
+  def pull(name) do
+    GenServer.call(name, :pull, :infinity)
   end
 
   defp metric_type(%Metrics.Counter{}), do: :counter
@@ -138,7 +143,10 @@ defmodule OtelMetricExporter.MetricStore do
     metrics = Map.get(config, :metrics, [])
     metrics_table = config.name
     finch_pool = Map.get(config, :finch_pool, OtelMetricExporter.Finch)
-    Process.send_after(self(), :export, config.export_period)
+
+    if not config[:pull_mode] do
+      Process.send_after(self(), :export, config.export_period)
+    end
 
     # Create ETS table for metrics
     :ets.new(metrics_table, [:ordered_set, :public, :named_table, {:write_concurrency, :auto}])
@@ -168,6 +176,15 @@ defmodule OtelMetricExporter.MetricStore do
       error ->
         {:reply, error, state}
     end
+  end
+
+  @impl true
+  def handle_call(:pull, _from, state) do
+    current_gen = rotate_generation(state)
+    earliest_gen = earliest_gen(state.generations_table)
+    metrics = collect_metrics(state, earliest_gen, current_gen)
+    if metrics != [], do: clear_generations(state, earliest_gen..current_gen//1)
+    {:reply, {:ok, metrics}, state}
   end
 
   @impl true

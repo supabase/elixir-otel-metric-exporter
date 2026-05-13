@@ -24,6 +24,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       metrics: [],
       finch_pool: TestFinch,
       retry: false,
+      pull_mode: false,
       name: @name
     }
 
