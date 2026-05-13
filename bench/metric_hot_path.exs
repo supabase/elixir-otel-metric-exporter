@@ -46,6 +46,15 @@ original_config = %{metrics: metrics, name: original_name}
 
 parallel = System.get_env("BENCH_PARALLEL", "1") |> String.to_integer()
 
+profile_after =
+  case System.get_env("BENCH_PROFILE") do
+    nil -> false
+    "" -> false
+    "tprof" -> :tprof
+    "eprof" -> :eprof
+    profiler -> raise "Unsupported BENCH_PROFILE=#{inspect(profiler)}. Use tprof or eprof."
+  end
+
 Benchee.run(
   %{
     "original" => fn ->
@@ -58,5 +67,6 @@ Benchee.run(
   time: 5,
   warmup: 2,
   memory_time: 2,
-  parallel: parallel
+  parallel: parallel,
+  profile_after: profile_after
 )
