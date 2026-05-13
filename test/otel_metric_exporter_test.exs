@@ -116,6 +116,21 @@ defmodule OtelMetricExporterTest do
                63
     end
 
+    test "ignores non-counter metrics with missing measurements" do
+      metrics = [
+        Telemetry.Metrics.sum("test.missing.sum", event_name: [:test, :missing]),
+        Telemetry.Metrics.last_value("test.missing.last_value", event_name: [:test, :missing]),
+        Telemetry.Metrics.distribution("test.missing.distribution", event_name: [:test, :missing])
+      ]
+
+      start_supervised!({OtelMetricExporter, @base_config ++ [metrics: metrics]})
+
+      :telemetry.execute([:test, :missing], %{}, %{})
+      Process.sleep(100)
+
+      assert OtelMetricExporter.MetricStore.get_metrics(@name) == %{}
+    end
+
     test "handles tag functions" do
       metrics = [
         Telemetry.Metrics.counter(
