@@ -38,36 +38,21 @@ start_store = fn name, extra ->
   HandlerConfig.compile(metrics, config)
 end
 
-ets_config = start_store.(:metric_hot_path_ets, %{})
+original_name = :metric_hot_path_original
+{:ok, _pid} = MetricStore.start_link(Map.put(base_config, :name, original_name))
+
 striped_config = start_store.(:metric_hot_path_striped, %{storage: :striped})
-atomics_config = start_store.(:metric_hot_path_atomics, %{distribution_storage: :atomics})
-
-striped_atomics_config =
-  start_store.(:metric_hot_path_striped_atomics, %{
-    storage: :striped,
-    distribution_storage: :atomics
-  })
-
-raw_config = %{metrics: metrics, name: :metric_hot_path_ets}
+original_config = %{metrics: metrics, name: original_name}
 
 parallel = System.get_env("BENCH_PARALLEL", "1") |> String.to_integer()
 
 Benchee.run(
   %{
-    "raw handler / ets" => fn ->
-      OtelMetricExporter.handle_metric(event, measurements, metadata, raw_config)
-    end,
-    "metric ids / ets" => fn ->
-      OtelMetricExporter.handle_metric(event, measurements, metadata, ets_config)
+    "original" => fn ->
+      OtelMetricExporter.handle_metric(event, measurements, metadata, original_config)
     end,
     "metric ids / striped ets" => fn ->
       OtelMetricExporter.handle_metric(event, measurements, metadata, striped_config)
-    end,
-    "metric ids / atomics" => fn ->
-      OtelMetricExporter.handle_metric(event, measurements, metadata, atomics_config)
-    end,
-    "metric ids / striped ets + atomics" => fn ->
-      OtelMetricExporter.handle_metric(event, measurements, metadata, striped_atomics_config)
     end
   },
   time: 5,
