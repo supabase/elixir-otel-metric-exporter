@@ -172,7 +172,7 @@ defmodule OtelMetricExporter do
           end
 
         if metric_type(metric) == :counter or is_number(value) do
-          metric_name = "#{Enum.join(metric.name, ".")}"
+          metric_name = Enum.join(metric.name, ".")
           MetricStore.write_metric(name, metric, metric_name, value, tags)
         end
       end
