@@ -494,7 +494,7 @@ defmodule OtelMetricExporter.MetricStore do
       :public,
       :named_table,
       {:write_concurrency, :auto},
-      {:read_concurrency, false},
+      {:read_concurrency, true},
       {:decentralized_counters, true}
     ]
 
@@ -506,8 +506,8 @@ defmodule OtelMetricExporter.MetricStore do
     opts = [
       :ordered_set,
       :public,
-      {:write_concurrency, true},
-      {:read_concurrency, false},
+      {:write_concurrency, :auto},
+      {:read_concurrency, true},
       {:decentralized_counters, true}
     ]
 
