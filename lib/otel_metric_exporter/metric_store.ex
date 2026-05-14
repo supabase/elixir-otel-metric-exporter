@@ -144,7 +144,7 @@ defmodule OtelMetricExporter.MetricStore do
     metrics_table = config.name
     finch_pool = Map.get(config, :finch_pool, OtelMetricExporter.Finch)
 
-    if not config[:pull_mode] do
+    if config[:pull_mode] != true do
       Process.send_after(self(), :export, config.export_period)
     end
 
