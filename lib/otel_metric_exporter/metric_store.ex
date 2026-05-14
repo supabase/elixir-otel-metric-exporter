@@ -144,9 +144,8 @@ defmodule OtelMetricExporter.MetricStore do
     metrics_table = config.name
     finch_pool = Map.get(config, :finch_pool, OtelMetricExporter.Finch)
 
-    if config[:pull_mode] != true do
-      Process.send_after(self(), :export, config.export_period)
-    end
+    timer_message = if config[:pull_mode] == true, do: :rotate_and_trim, else: :export
+    Process.send_after(self(), timer_message, config.export_period)
 
     # Create ETS table for metrics
     :ets.new(metrics_table, [:ordered_set, :public, :named_table, {:write_concurrency, :auto}])
@@ -188,6 +187,12 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   @impl true
+  def handle_info(:rotate_and_trim, state) do
+    rotate_generation(state)
+    Process.send_after(self(), :rotate_and_trim, state.config.export_period)
+    {:noreply, state}
+  end
+
   def handle_info(:export, state) do
     {duration, _} = :timer.tc(fn -> export_metrics(state) end, :millisecond)
 

@@ -92,24 +92,31 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     end
   end
 
-  describe "timer disarming in pull mode" do
-    test "no :export message fired after export_period when pull_mode is true" do
-      config = %{
-        export_period: 50,
-        metrics: [],
-        name: @name,
-        pull_mode: true
-      }
+  test "max_table_memory enforced in pull mode without pull call" do
+    metric = Telemetry.Metrics.sum("pull.trim.value")
 
-      pid = start_supervised!({MetricStore, config})
+    config = %{
+      export_period: 60_000,
+      metrics: [metric],
+      name: @name,
+      pull_mode: true,
+      max_table_memory: 1
+    }
 
-      # Wait longer than export_period
-      Process.sleep(200)
+    start_supervised!({MetricStore, config})
 
-      # The GenServer mailbox should not have accumulated :export messages
-      {:messages, msgs} = Process.info(pid, :messages)
-      refute :export in msgs
-    end
+    MetricStore.write_metric(@name, metric, 1, %{"k" => "v"})
+    refute MetricStore.get_metrics(@name, 0) == %{}
+
+    send(@name, :rotate_and_trim)
+    :timer.sleep(50)
+    MetricStore.write_metric(@name, metric, 1, %{"k" => "v"})
+
+    send(@name, :rotate_and_trim)
+    :timer.sleep(50)
+
+    assert MetricStore.get_metrics(@name, 0) == %{}
+    assert MetricStore.get_metrics(@name, 1) == %{}
   end
 
   describe "validation" do
