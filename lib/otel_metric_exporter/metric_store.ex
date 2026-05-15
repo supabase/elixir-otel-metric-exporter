@@ -182,7 +182,7 @@ defmodule OtelMetricExporter.MetricStore do
     current_gen = rotate_generation(state)
     earliest_gen = earliest_gen(state.generations_table)
     metrics = collect_metrics(state, earliest_gen, current_gen)
-    if metrics != [], do: clear_generations(state, earliest_gen..current_gen//1)
+    clear_generations(state, earliest_gen..current_gen//1)
     {:reply, {:ok, metrics}, state}
   end
 
@@ -248,7 +248,7 @@ defmodule OtelMetricExporter.MetricStore do
 
     case OtelApi.send_metrics(state.api, metrics) do
       :ok ->
-        if metrics != [], do: clear_generations(state, earliest_gen..current_gen//1)
+        clear_generations(state, earliest_gen..current_gen//1)
         :ok
 
       {:error, reason} = err ->
