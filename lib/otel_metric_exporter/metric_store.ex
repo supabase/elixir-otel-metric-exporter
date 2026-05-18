@@ -88,6 +88,7 @@ defmodule OtelMetricExporter.MetricStore do
   def write_metric(metrics_table, metric, value, tags),
     do: write_metric(metrics_table, metric, Enum.join(metric.name, "."), value, tags)
 
+
   def write_metric(metrics_table, %Metrics.Counter{} = metric, string_name, _, tags) do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
@@ -95,6 +96,7 @@ defmodule OtelMetricExporter.MetricStore do
     :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
   end
 
+  def write_metric(_metrics_table, %Metrics.Sum{} = _metric, _string_name, value, _tags) when not is_number(value), do: :ok
   def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
@@ -108,6 +110,7 @@ defmodule OtelMetricExporter.MetricStore do
     :ets.update_element(metrics_table, ets_key, {2, value}, {ets_key, value, nil})
   end
 
+  def write_metric(_metrics_table, %Metrics.Distribution{} = _metric, _string_name, value, _tags) when not is_number(value), do: :ok
   def write_metric(metrics_table, %Metrics.Distribution{} = metric, string_name, value, tags) do
     bucket = find_bucket(metric, value)
     generation = :persistent_term.get(generation_key(metrics_table))
