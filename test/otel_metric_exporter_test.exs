@@ -164,6 +164,26 @@ defmodule OtelMetricExporterTest do
              ]) == 1
     end
 
+    test "does not detach sum handler on bad arg" do
+      test_event = :"event_#{inspect(self())}"
+
+      metrics = [
+        Telemetry.Metrics.sum("test.event.value", event_name: [:test, test_event])
+      ]
+
+      start_supervised!({OtelMetricExporter, @base_config ++ [metrics: metrics]})
+
+      handlers = :telemetry.list_handlers([:test, test_event])
+      assert 1 == Enum.count(handlers)
+
+      :telemetry.execute([:test, test_event], %{value: :not_supported}, %{})
+
+      handlers = :telemetry.list_handlers([:test, test_event])
+      assert 1 == Enum.count(handlers)
+
+      stop_supervised!(OtelMetricExporter)
+    end
+
     test "handles detaching of handlers on shutdown" do
       test_event = :"event_#{inspect(self())}"
 
