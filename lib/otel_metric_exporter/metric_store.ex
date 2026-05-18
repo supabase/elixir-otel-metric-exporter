@@ -88,7 +88,6 @@ defmodule OtelMetricExporter.MetricStore do
   def write_metric(metrics_table, metric, value, tags),
     do: write_metric(metrics_table, metric, Enum.join(metric.name, "."), value, tags)
 
-
   def write_metric(metrics_table, %Metrics.Counter{} = metric, string_name, _, tags) do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
