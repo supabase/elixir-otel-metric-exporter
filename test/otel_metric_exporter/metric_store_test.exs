@@ -57,6 +57,19 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert %{{:sum, "test.value"} => %{^tags => 3}} = metrics
     end
 
+    test "ignores sum metrics when value is nan" do
+      metric = Metrics.sum("test.value")
+      tags = %{test: "value"}
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+      MetricStore.write_metric(@name, metric, :not_supported, tags)
+      MetricStore.write_metric(@name, metric, 2, tags)
+
+      metrics = MetricStore.get_metrics(@name)
+
+      assert %{{:sum, "test.value"} => %{^tags => 3}} = metrics
+    end
+
     test "records last value metrics" do
       metric = Metrics.last_value("test.value")
       tags = %{test: "value"}
@@ -74,6 +87,25 @@ defmodule OtelMetricExporter.MetricStoreTest do
       tags = %{test: "value"}
 
       MetricStore.write_metric(@name, metric, 2, tags)
+      MetricStore.write_metric(@name, metric, 3, tags)
+      MetricStore.write_metric(@name, metric, 5, tags)
+      MetricStore.write_metric(@name, metric, 5, tags)
+
+      metrics = MetricStore.get_metrics(@name)
+
+      assert %{
+               {:distribution, "test.value"} => %{
+                 ^tags => %{0 => {1, 2}, 1 => {1, 3}, 2 => {2, 10}}
+               }
+             } = metrics
+    end
+
+    test "ignores distribution metric when value is nan" do
+      metric = Metrics.distribution("test.value", reporter_options: [buckets: [2, 4]])
+      tags = %{test: "value"}
+
+      MetricStore.write_metric(@name, metric, 2, tags)
+      MetricStore.write_metric(@name, metric, :not_supported, tags)
       MetricStore.write_metric(@name, metric, 3, tags)
       MetricStore.write_metric(@name, metric, 5, tags)
       MetricStore.write_metric(@name, metric, 5, tags)
