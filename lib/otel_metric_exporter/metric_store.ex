@@ -93,24 +93,33 @@ defmodule OtelMetricExporter.MetricStore do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
-    :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
+      :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
   end
 
-  def write_metric(_metrics_table, %Metrics.Sum{} = _metric, _string_name, value, _tags) when not is_number(value), do: :ok
+  def write_metric(_metrics_table, %Metrics.Sum{}, _string_name, value, _tags) when not is_number(value), do: :ok
   def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
-    :ets.update_counter(metrics_table, ets_key, value, {ets_key, 0, nil})
+    try do
+      :ets.update_counter(metrics_table, ets_key, value, {ets_key, 0, nil})
+    rescue
+      ArgumentError -> :ok
+    end
   end
 
   def write_metric(metrics_table, %Metrics.LastValue{} = metric, string_name, value, tags) do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
-    :ets.update_element(metrics_table, ets_key, {2, value}, {ets_key, value, nil})
+
+    try do
+      :ets.update_element(metrics_table, ets_key, {2, value}, {ets_key, value, nil})
+    rescue
+      ArgumentError -> :ok
+    end
   end
 
-  def write_metric(_metrics_table, %Metrics.Distribution{} = _metric, _string_name, value, _tags) when not is_number(value), do: :ok
+  def write_metric(_metrics_table, %Metrics.Distribution{}, _string_name, value, _tags) when not is_number(value), do: :ok
   def write_metric(metrics_table, %Metrics.Distribution{} = metric, string_name, value, tags) do
     bucket = find_bucket(metric, value)
     generation = :persistent_term.get(generation_key(metrics_table))
@@ -118,12 +127,16 @@ defmodule OtelMetricExporter.MetricStore do
     update_counter_op = {2, 1}
     update_sum_op = {3, round(value)}
 
-    :ets.update_counter(
-      metrics_table,
-      ets_key,
-      [update_counter_op, update_sum_op],
-      {ets_key, 0, 0}
-    )
+    try do
+      :ets.update_counter(
+        metrics_table,
+        ets_key,
+        [update_counter_op, update_sum_op],
+        {ets_key, 0, 0}
+      )
+    rescue
+      ArgumentError -> :ok
+    end
   end
 
   defp find_bucket(%Metrics.Distribution{reporter_options: opts}, value) do

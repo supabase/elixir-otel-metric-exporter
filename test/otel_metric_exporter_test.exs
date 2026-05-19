@@ -184,6 +184,34 @@ defmodule OtelMetricExporterTest do
       stop_supervised!(OtelMetricExporter)
     end
 
+    test "does not detach handler when metric store crashes and ets table is gone" do
+      test_event = :"event_#{inspect(self())}"
+
+      metrics = [
+        Telemetry.Metrics.sum("test.event.value", event_name: [:test, test_event])
+      ]
+
+      start_supervised!({OtelMetricExporter, @base_config ++ [metrics: metrics]})
+
+      assert 1 == :telemetry.list_handlers([:test, test_event]) |> Enum.count()
+
+      # Simulate MetricStore crash: kill the process (deletes the ETS table since it's the owner).
+      # Monitor it so we know exactly when it's gone, then fire before the supervisor restarts it.
+      metric_store_pid = Process.whereis(@name)
+      ref = Process.monitor(metric_store_pid)
+      Process.exit(metric_store_pid, :kill)
+
+      receive do
+        {:DOWN, ^ref, :process, _, _} -> :ok
+      end
+
+      :telemetry.execute([:test, test_event], %{value: 42}, %{})
+
+      assert 1 == :telemetry.list_handlers([:test, test_event]) |> Enum.count()
+
+      stop_supervised!(OtelMetricExporter)
+    end
+
     test "handles detaching of handlers on shutdown" do
       test_event = :"event_#{inspect(self())}"
 
