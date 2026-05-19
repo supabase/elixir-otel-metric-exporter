@@ -93,11 +93,7 @@ defmodule OtelMetricExporter.MetricStore do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
 
-    try do
       :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
-    rescue
-      ArgumentError -> :ok
-    end
   end
 
   def write_metric(_metrics_table, %Metrics.Sum{}, _string_name, value, _tags) when not is_number(value), do: :ok
