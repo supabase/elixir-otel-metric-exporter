@@ -184,6 +184,28 @@ defmodule OtelMetricExporterTest do
       stop_supervised!(OtelMetricExporter)
     end
 
+    test "does not detach handler when ets key is missing (generation rotation race)" do
+      test_event = :"event_#{inspect(self())}"
+
+      metrics = [
+        Telemetry.Metrics.sum("test.event.value", event_name: [:test, test_event])
+      ]
+
+      start_supervised!({OtelMetricExporter, @base_config ++ [metrics: metrics]})
+
+      assert 1 == :telemetry.list_handlers([:test, test_event]) |> Enum.count()
+
+      # Simulate generation rotation race by deleting all rows from the ETS table
+      # so the default-insert in update_counter has no valid generation slot
+      :ets.delete_all_objects(@name)
+
+      :telemetry.execute([:test, test_event], %{value: 42}, %{})
+
+      assert 1 == :telemetry.list_handlers([:test, test_event]) |> Enum.count()
+
+      stop_supervised!(OtelMetricExporter)
+    end
+
     test "handles detaching of handlers on shutdown" do
       test_event = :"event_#{inspect(self())}"
 
