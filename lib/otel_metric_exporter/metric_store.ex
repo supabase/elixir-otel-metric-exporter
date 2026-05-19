@@ -95,6 +95,7 @@ defmodule OtelMetricExporter.MetricStore do
     :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
   end
 
+  def write_metric(_metrics_table, %Metrics.Sum{} = _metric, _string_name, value, _tags) when not is_number(value), do: :ok
   def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
     generation = :persistent_term.get(generation_key(metrics_table))
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
@@ -108,6 +109,7 @@ defmodule OtelMetricExporter.MetricStore do
     :ets.update_element(metrics_table, ets_key, {2, value}, {ets_key, value, nil})
   end
 
+  def write_metric(_metrics_table, %Metrics.Distribution{} = _metric, _string_name, value, _tags) when not is_number(value), do: :ok
   def write_metric(metrics_table, %Metrics.Distribution{} = metric, string_name, value, tags) do
     bucket = find_bucket(metric, value)
     generation = :persistent_term.get(generation_key(metrics_table))
@@ -221,62 +223,39 @@ defmodule OtelMetricExporter.MetricStore do
 
   defp export_metrics(%State{} = state) do
     current_gen = rotate_generation(state)
-
     earliest_gen = earliest_gen(state.generations_table)
+    metrics = collect_metrics(state, earliest_gen, current_gen)
 
-    metrics =
-      earliest_gen..current_gen//1
-      |> Enum.flat_map(fn gen ->
-        {_, start, finish} =
-          List.first(:ets.lookup(state.generations_table, gen), {nil, nil, nil})
+    case OtelApi.send_metrics(state.api, metrics) do
+      :ok ->
+        if metrics != [], do: clear_generations(state, earliest_gen..current_gen//1)
+        :ok
 
-        get_metrics(state.metrics_table, gen)
-        |> Enum.map(fn {key, values} ->
-          tagged_values = Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)
-          {key, tagged_values}
-        end)
-      end)
-      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
-      |> Enum.map(fn {{type, name}, grouped_values} ->
-        metric =
-          Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
-
-        convert_metric(metric, List.flatten(grouped_values))
-      end)
-
-    max_concurrency = Map.get(state.api.config, :max_concurrency, System.schedulers_online())
-
-    batch_results =
-      metrics
-      |> create_batches(state.api.config.max_batch_size)
-      |> Enum.with_index()
-      |> Task.async_stream(
-        fn {batch, idx} -> {idx, batch, OtelApi.send_metrics(state.api, batch)} end,
-        max_concurrency: max_concurrency,
-        timeout: 60_000,
-        on_timeout: :kill_task
-      )
-      |> Enum.to_list()
-
-    successful_keys =
-      for {:ok, {_, batch, :ok}} <- batch_results,
-          %Metric{name: name, data: data} <- batch,
-          do: {otlp_data_type(data), name}
-
-    # Deduplicate successful_keys since split metrics have the same name/type
-    unique_successful_keys = MapSet.new(successful_keys)
-
-    if MapSet.size(unique_successful_keys) == length(metrics) and metrics != [] do
-      clear_generations(state, earliest_gen..current_gen//1)
-      :ok
-    else
-      unless successful_keys == [] do
-        delete_metrics_by_keys(state, earliest_gen..current_gen//1, unique_successful_keys)
-      end
-
-      log_failures(batch_results)
-      {:error, :partial_failure}
+      {:error, reason} = err ->
+        Logger.error("Failed to export metrics: #{inspect(reason)}")
+        err
     end
+  end
+
+  defp collect_metrics(%State{} = state, earliest_gen, current_gen) do
+    earliest_gen..current_gen//1
+    |> Enum.flat_map(fn gen ->
+      {_, start, finish} =
+        List.first(:ets.lookup(state.generations_table, gen), {nil, nil, nil})
+
+      get_metrics(state.metrics_table, gen)
+      |> Enum.map(fn {key, values} ->
+        tagged_values = Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)
+        {key, tagged_values}
+      end)
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.map(fn {{type, name}, grouped_values} ->
+      metric =
+        Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
+
+      convert_metric(metric, List.flatten(grouped_values))
+    end)
   end
 
   defp earliest_gen(generations_table) do
@@ -284,67 +263,6 @@ defmodule OtelMetricExporter.MetricStore do
       :"$end_of_table" -> 0
       x -> x
     end
-  end
-
-  defp create_batches(metrics, max_batch_size) do
-    do_create_batches(metrics, max_batch_size, [], 0, [])
-  end
-
-  defp do_create_batches([], _max_size, [], _current_count, acc) do
-    Enum.reverse(acc)
-  end
-
-  defp do_create_batches([], _max_size, current_batch, _current_count, acc) do
-    Enum.reverse([Enum.reverse(current_batch) | acc])
-  end
-
-  defp do_create_batches([metric | rest], max_size, current_batch, current_count, acc) do
-    metric_count = count_data_points(metric)
-
-    cond do
-      # Metric fits in current batch
-      current_count + metric_count <= max_size ->
-        do_create_batches(
-          rest,
-          max_size,
-          [metric | current_batch],
-          current_count + metric_count,
-          acc
-        )
-
-      # Metric needs to be split
-      metric_count > max_size ->
-        chunks = split_metric(metric, max_size)
-        new_acc = if current_batch == [], do: acc, else: [Enum.reverse(current_batch) | acc]
-        do_create_batches(chunks ++ rest, max_size, [], 0, new_acc)
-
-      # Emit current batch and start new one with this metric
-      true ->
-        new_acc = if current_batch == [], do: acc, else: [Enum.reverse(current_batch) | acc]
-        do_create_batches(rest, max_size, [metric], metric_count, new_acc)
-    end
-  end
-
-  defp count_data_points(%Metric{data: {_, %_{data_points: data_points}}}),
-    do: Enum.count(data_points)
-
-  defp split_metric(
-         %Metric{name: name, description: description, unit: unit, data: {data_type, data_struct}} =
-           _metric,
-         max_batch_size
-       ) do
-    data_points = data_struct.data_points
-
-    data_points
-    |> Enum.chunk_every(max_batch_size)
-    |> Enum.map(fn chunk ->
-      %Metric{
-        name: name,
-        description: description,
-        unit: unit,
-        data: {data_type, Map.put(data_struct, :data_points, chunk)}
-      }
-    end)
   end
 
   defp convert_metric(
@@ -451,45 +369,10 @@ defmodule OtelMetricExporter.MetricStore do
   defp convert_unit(:terabyte), do: "TBy"
   defp convert_unit(x) when is_atom(x), do: Atom.to_string(x)
 
-  defp otlp_data_type({:sum, %Sum{is_monotonic: true}}), do: :counter
-  defp otlp_data_type({:sum, _}), do: :sum
-  defp otlp_data_type({:gauge, _}), do: :last_value
-  defp otlp_data_type({:histogram, _}), do: :distribution
-
   defp clear_generations(state, range) do
     for gen <- range do
       :ets.match_delete(state.metrics_table, {{gen, :_, :_, :_, :_}, :_, :_})
       :ets.delete(state.generations_table, gen)
-    end
-  end
-
-  defp delete_metrics_by_keys(state, range, keys) do
-    for gen <- range do
-      for {type, name} <- keys do
-        :ets.match_delete(state.metrics_table, {{gen, name, type, :_, :_}, :_, :_})
-      end
-
-      if :ets.match_object(state.metrics_table, {{gen, :_, :_, :_, :_}, :_, :_}) == [] do
-        :ets.delete(state.generations_table, gen)
-      end
-    end
-  end
-
-  defp log_failures(batch_results) do
-    for result <- batch_results do
-      case result do
-        {:ok, {_, _, :ok}} ->
-          :ok
-
-        {:ok, {idx, _, {:error, reason}}} ->
-          Logger.error("Failed to export batch #{idx}: #{inspect(reason)}")
-
-        {:exit, reason} ->
-          Logger.error("Batch export task exited: #{inspect(reason)}")
-
-        other ->
-          Logger.error("Unexpected batch result: #{inspect(other)}")
-      end
     end
   end
 

@@ -57,6 +57,19 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert %{{:sum, "test.value"} => %{^tags => 3}} = metrics
     end
 
+    test "ignores sum metrics when value is nan" do
+      metric = Metrics.sum("test.value")
+      tags = %{test: "value"}
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+      MetricStore.write_metric(@name, metric, :not_supported, tags)
+      MetricStore.write_metric(@name, metric, 2, tags)
+
+      metrics = MetricStore.get_metrics(@name)
+
+      assert %{{:sum, "test.value"} => %{^tags => 3}} = metrics
+    end
+
     test "records last value metrics" do
       metric = Metrics.last_value("test.value")
       tags = %{test: "value"}
@@ -74,6 +87,25 @@ defmodule OtelMetricExporter.MetricStoreTest do
       tags = %{test: "value"}
 
       MetricStore.write_metric(@name, metric, 2, tags)
+      MetricStore.write_metric(@name, metric, 3, tags)
+      MetricStore.write_metric(@name, metric, 5, tags)
+      MetricStore.write_metric(@name, metric, 5, tags)
+
+      metrics = MetricStore.get_metrics(@name)
+
+      assert %{
+               {:distribution, "test.value"} => %{
+                 ^tags => %{0 => {1, 2}, 1 => {1, 3}, 2 => {2, 10}}
+               }
+             } = metrics
+    end
+
+    test "ignores distribution metric when value is nan" do
+      metric = Metrics.distribution("test.value", reporter_options: [buckets: [2, 4]])
+      tags = %{test: "value"}
+
+      MetricStore.write_metric(@name, metric, 2, tags)
+      MetricStore.write_metric(@name, metric, :not_supported, tags)
       MetricStore.write_metric(@name, metric, 3, tags)
       MetricStore.write_metric(@name, metric, 5, tags)
       MetricStore.write_metric(@name, metric, 5, tags)
@@ -256,7 +288,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       metrics = MetricStore.get_metrics(@name)
 
       # Export metrics synchronously
-      assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export batch"
+      assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export metrics"
 
       # Verify metrics were not cleared due to error
       assert MetricStore.get_metrics(@name, 0) == metrics
@@ -274,7 +306,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       metrics = MetricStore.get_metrics(@name)
 
       # Export metrics synchronously
-      assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export batch"
+      assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export metrics"
 
       # Verify metrics were not cleared due to error
       assert MetricStore.get_metrics(@name, 0) == metrics
@@ -326,88 +358,125 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert MetricStore.get_metrics(@name, 1) == %{}
     end
 
-    test "splits large metric sets into batches", %{bypass: bypass, store_config: config} do
-      metrics = Enum.map(1..60, &Metrics.counter("test.counter.#{&1}"))
-      start_supervised!({MetricStore, Map.merge(config, %{metrics: metrics, max_batch_size: 50})})
+    test "clears all metrics on successful HTTP export", %{bypass: bypass, store_config: config} do
+      metric1 = Metrics.counter("test.counter.1")
+      metric2 = Metrics.counter("test.counter.2")
+      start_supervised!({MetricStore, %{config | metrics: [metric1, metric2]}})
 
-      Enum.each(metrics, &MetricStore.write_metric(@name, &1, 1, %{}))
-
-      {:ok, agent} = Agent.start_link(fn -> [] end)
-
-      Bypass.expect(bypass, "POST", "/v1/metrics", fn conn ->
-        {:ok, body, _} = Plug.Conn.read_body(conn)
-
-        [%{scope_metrics: [%{metrics: batch}]}] =
-          ExportMetricsServiceRequest.decode(body).resource_metrics
-
-        Agent.update(agent, &[length(batch) | &1])
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
         Plug.Conn.resp(conn, 200, "")
       end)
 
+      MetricStore.write_metric(@name, metric1, 1, %{})
+      MetricStore.write_metric(@name, metric2, 1, %{})
+
       assert :ok = MetricStore.export_sync(@name)
+
+      # All metrics cleared after successful export
       assert MetricStore.get_metrics(@name, 0) == %{}
-      assert Agent.get(agent, & &1) |> Enum.sort() == [10, 50]
     end
 
-    test "splits large metric data points into smaller sets", %{
-      bypass: bypass,
+    test "retains all metrics on HTTP server error", %{bypass: bypass, store_config: config} do
+      metric1 = Metrics.counter("test.counter.1")
+      metric2 = Metrics.counter("test.counter.2")
+      tags = %{test: "value"}
+      start_supervised!({MetricStore, %{config | metrics: [metric1, metric2]}})
+
+      MetricStore.write_metric(@name, metric1, 1, tags)
+      MetricStore.write_metric(@name, metric2, 1, tags)
+
+      metrics_before = MetricStore.get_metrics(@name, 0)
+
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
+        Plug.Conn.resp(conn, 500, "Internal Server Error")
+      end)
+
+      log = capture_log(fn -> assert {:error, _} = MetricStore.export_sync(@name) end)
+
+      assert log =~ "Failed to export metrics"
+
+      # All metrics retained on failure (all-or-nothing semantics)
+      assert MetricStore.get_metrics(@name, 0) == metrics_before
+    end
+  end
+
+  describe "callback export" do
+    test "callback is invoked exactly once with the full metric list", %{
       store_config: config
     } do
-      metrics =
-        Enum.map(1..60, fn _ -> Metrics.last_value("test.counter.1", tags: [:my_field]) end)
+      metrics = Enum.map(1..8, &Metrics.counter("test.counter.#{&1}"))
+      test_pid = self()
 
-      start_supervised!({MetricStore, Map.merge(config, %{metrics: metrics, max_batch_size: 50})})
-
-      Enum.each(
-        metrics,
-        &MetricStore.write_metric(@name, &1, 1, %{my_field: "counter_#{:rand.uniform(100_000)}"})
-      )
-
-      {:ok, agent} = Agent.start_link(fn -> [] end)
-
-      Bypass.expect(bypass, "POST", "/v1/metrics", fn conn ->
-        {:ok, body, _} = Plug.Conn.read_body(conn)
-
-        [%{scope_metrics: [%{metrics: [%{data: {:gauge, %{data_points: data_points}}}]}]}] =
-          ExportMetricsServiceRequest.decode(body).resource_metrics
-
-        Agent.update(agent, &[length(data_points) | &1])
-        Plug.Conn.resp(conn, 200, "")
-      end)
-
-      assert :ok = MetricStore.export_sync(@name)
-      assert MetricStore.get_metrics(@name, 0) == %{}
-
-      for v <- Agent.get(agent, & &1) do
-        assert v <= 50
+      callback = fn payload, _config ->
+        send(test_pid, payload)
+        :ok
       end
-    end
 
-    test "retains only failed batch metrics", %{bypass: bypass, store_config: config} do
-      metrics = Enum.map(1..60, &Metrics.counter("test.counter.#{&1}"))
-      start_supervised!({MetricStore, Map.merge(config, %{metrics: metrics, max_batch_size: 50})})
+      config =
+        Map.merge(config, %{export_callback: callback, metrics: metrics})
+
+      start_supervised!({MetricStore, config})
 
       Enum.each(metrics, &MetricStore.write_metric(@name, &1, 1, %{}))
 
-      Bypass.expect(bypass, "POST", "/v1/metrics", fn conn ->
-        {:ok, body, _} = Plug.Conn.read_body(conn)
+      assert :ok = MetricStore.export_sync(@name)
 
-        [%{scope_metrics: [%{metrics: batch}]}] =
-          ExportMetricsServiceRequest.decode(body).resource_metrics
+      assert_received {:metrics, all_metrics}
+      assert length(all_metrics) == 8
+      refute_received {:metrics, _all_metrics}
+    end
 
-        status = if length(batch) == 50, do: 200, else: 500
-        Plug.Conn.resp(conn, status, "")
+    test "successful callback clears generations from metrics_table", %{store_config: config} do
+      metric = Metrics.sum("test.sum")
+      tags = %{test: "value"}
+      test_pid = self()
+
+      callback = fn payload, _config ->
+        send(test_pid, payload)
+        :ok
+      end
+
+      start_supervised!(
+        {MetricStore, Map.merge(config, %{export_callback: callback, metrics: [metric]})}
+      )
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+      MetricStore.write_metric(@name, metric, 2, tags)
+
+      # Confirm there's data before
+      assert %{{:sum, "test.sum"} => %{^tags => 3}} = MetricStore.get_metrics(@name, 0)
+
+      assert :ok = MetricStore.export_sync(@name)
+
+      # Both generation 0 (drained) is cleared
+      assert MetricStore.get_metrics(@name, 0) == %{}
+    end
+  end
+
+  test "returns error", %{store_config: config} do
+    metric = Metrics.sum("test.sum")
+    tags = %{test: "value"}
+
+    callback = fn _payload, _config ->
+      {:error, :failed}
+    end
+
+    config =
+      Map.merge(config, %{export_callback: callback, metrics: [metric]})
+
+    start_supervised!({MetricStore, config})
+
+    MetricStore.write_metric(@name, metric, 1, tags)
+    MetricStore.write_metric(@name, metric, 2, tags)
+
+    log =
+      capture_log(fn ->
+        assert {:error, :failed} = MetricStore.export_sync(@name)
       end)
 
-      :timer.sleep(500)
+    assert log =~ ":failed"
 
-      log =
-        capture_log(fn -> assert {:error, :partial_failure} = MetricStore.export_sync(@name) end)
-
-      assert log =~ "Failed to export batch"
-
-      # First batch (50 metrics) succeeds and is cleared, second batch (10 metrics) fails and is retained
-      assert map_size(MetricStore.get_metrics(@name, 0)) == 10
-    end
+    # Metrics are retained across all generations (gen 0 contained the writes)
+    assert %{{:sum, "test.sum"} => %{^tags => 3}} = MetricStore.get_metrics(@name, 0)
   end
 end
