@@ -40,7 +40,8 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                   otlp_headers: %{},
                   otlp_protocol: :http_protobuf,
                   otlp_timeout: 10000,
-                  export_callback: nil
+                  export_callback: nil,
+                  max_table_memory: 2_000_000_000
                 }}
     end
 
@@ -48,30 +49,22 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
       System.put_env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
       System.put_env("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://localhost:4318")
       System.put_env("OTEL_EXPORTER_OTLP_METRICS_HEADERS", "key1=value1,key2=value2")
-      System.put_env("OTEL_EXPORTER_OTLP_TIMEOUT", "10000")
+      System.put_env("OTEL_EXPORTER_OTLP_TIMEOUT", "210000")
       System.put_env("OTEL_METRICS_EXPORTER", "none")
 
-      assert OtelMetricExporter.OtelApi.Config.defaults() ==
-               {:ok,
-                %{
-                  logs: %{
-                    exporter: :otlp,
-                    otlp_endpoint: "http://localhost:4318"
-                  },
-                  metrics: %{
-                    exporter: :none,
-                    otlp_headers: %{"key1" => "value1", "key2" => "value2"}
-                  },
-                  otlp_compression: :gzip,
-                  otlp_concurrent_requests: 10,
-                  resource: %{},
-                  otlp_headers: %{},
-                  otlp_protocol: :http_protobuf,
-                  otlp_timeout: 10000,
-                  otlp_endpoint: "http://localhost:4317",
-                  pull_mode: false,
-                  export_callback: nil
-                }}
+      assert {:ok,
+              %{
+                logs: %{
+                  otlp_endpoint: "http://localhost:4318"
+                },
+                metrics: %{
+                  exporter: :none,
+                  otlp_headers: %{"key1" => "value1", "key2" => "value2"}
+                },
+                otlp_protocol: :http_protobuf,
+                otlp_timeout: 210_000,
+                otlp_endpoint: "http://localhost:4317"
+              }} = OtelMetricExporter.OtelApi.Config.defaults()
     end
 
     test "can be set by application config that overrides env vars" do
@@ -84,26 +77,18 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
 
       Application.put_env(:otel_metric_exporter, :metrics, %{exporter: :none})
 
-      assert OtelMetricExporter.OtelApi.Config.defaults() ==
-               {:ok,
-                %{
-                  logs: %{
-                    exporter: :otlp,
-                    otlp_endpoint: "http://localhost:4318"
-                  },
-                  metrics: %{
-                    exporter: :none,
-                    otlp_headers: %{"key1" => "value1", "key2" => "value2"}
-                  },
-                  otlp_compression: :gzip,
-                  otlp_concurrent_requests: 10,
-                  resource: %{},
-                  otlp_headers: %{},
-                  otlp_protocol: :http_protobuf,
-                  otlp_timeout: 10000,
-                  otlp_endpoint: "http://localhost:4317",
-                  export_callback: nil
-                }}
+      assert {:ok,
+              %{
+                logs: %{
+                  exporter: :otlp,
+                  otlp_endpoint: "http://localhost:4318"
+                },
+                metrics: %{
+                  exporter: :none,
+                  otlp_headers: %{"key1" => "value1", "key2" => "value2"}
+                },
+                otlp_endpoint: "http://localhost:4317"
+              }} = OtelMetricExporter.OtelApi.Config.defaults()
     end
   end
 

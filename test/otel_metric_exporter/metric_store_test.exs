@@ -58,6 +58,19 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert %{{:sum, "test.value"} => %{^tags => 3}} = metrics
     end
 
+    test "ignores sum metrics when value is nan" do
+      metric = Metrics.sum("test.value")
+      tags = %{test: "value"}
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+      MetricStore.write_metric(@name, metric, :not_supported, tags)
+      MetricStore.write_metric(@name, metric, 2, tags)
+
+      metrics = MetricStore.get_metrics(@name)
+
+      assert %{{:sum, "test.value"} => %{^tags => 3}} = metrics
+    end
+
     test "records last value metrics" do
       metric = Metrics.last_value("test.value")
       tags = %{test: "value"}
@@ -75,6 +88,25 @@ defmodule OtelMetricExporter.MetricStoreTest do
       tags = %{test: "value"}
 
       MetricStore.write_metric(@name, metric, 2, tags)
+      MetricStore.write_metric(@name, metric, 3, tags)
+      MetricStore.write_metric(@name, metric, 5, tags)
+      MetricStore.write_metric(@name, metric, 5, tags)
+
+      metrics = MetricStore.get_metrics(@name)
+
+      assert %{
+               {:distribution, "test.value"} => %{
+                 ^tags => %{0 => {1, 2}, 1 => {1, 3}, 2 => {2, 10}}
+               }
+             } = metrics
+    end
+
+    test "ignores distribution metric when value is nan" do
+      metric = Metrics.distribution("test.value", reporter_options: [buckets: [2, 4]])
+      tags = %{test: "value"}
+
+      MetricStore.write_metric(@name, metric, 2, tags)
+      MetricStore.write_metric(@name, metric, :not_supported, tags)
       MetricStore.write_metric(@name, metric, 3, tags)
       MetricStore.write_metric(@name, metric, 5, tags)
       MetricStore.write_metric(@name, metric, 5, tags)
@@ -122,8 +154,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
 
     defp induce_rotate_generation do
       capture_log(fn ->
-        send(@name, :export)
-        :timer.sleep(100)
+        MetricStore.export_sync(@name)
       end)
     end
 
@@ -156,7 +187,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       store_config: base_config,
       metric: metric
     } do
-      config = Map.put(base_config, :max_table_memory, 3800)
+      config = Map.put(base_config, :max_table_memory, 3600)
       start_supervised!({MetricStore, config})
 
       # create multiple lightweight generations
