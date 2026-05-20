@@ -18,7 +18,7 @@ defmodule OtelMetricExporter.PullProducer do
 
   alias OtelMetricExporter.MetricStore
 
-  @default_pull_interval 100
+  @default_pull_interval 1000
 
   def start_link(opts) do
     GenStage.start_link(__MODULE__, opts, name: opts[:name])
@@ -51,17 +51,22 @@ defmodule OtelMetricExporter.PullProducer do
   defp pull_and_emit(%{pending_demand: 0} = state), do: {:noreply, [], state}
 
   defp pull_and_emit(state) do
+    # TODO: Pull with limit
     case MetricStore.pull(state.metric_store_name) do
       {:ok, []} ->
         {:noreply, [], schedule_tick(state)}
 
       {:ok, metrics} ->
-        new_demand = max(state.pending_demand - length(metrics), 0)
+        data_points_count = Enum.sum_by(metrics, &count_data_points/1)
+        new_demand = max(state.pending_demand - data_points_count, 0)
         state = %{state | pending_demand: new_demand}
         state = if new_demand > 0, do: schedule_tick(state), else: state
         {:noreply, metrics, state}
     end
   end
+
+  defp count_data_points(%_metric{data: {_type, %_metric_type{data_points: points}}}),
+    do: length(points)
 
   defp schedule_tick(%{tick_ref: ref} = state) when is_reference(ref), do: state
 
