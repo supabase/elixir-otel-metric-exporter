@@ -91,6 +91,9 @@ defmodule OtelMetricExporter.MetricStore do
     end
   end
 
+  @spec record_count(atom()) :: non_neg_integer()
+  def record_count(name), do: :ets.info(name, :size)
+
   defp metric_type(%Metrics.Counter{}), do: :counter
   defp metric_type(%Metrics.Sum{}), do: :sum
   defp metric_type(%Metrics.LastValue{}), do: :last_value
@@ -106,7 +109,9 @@ defmodule OtelMetricExporter.MetricStore do
     :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
   end
 
-  def write_metric(_metrics_table, %Metrics.Sum{} = _metric, _string_name, value, _tags) when not is_number(value), do: :ok
+  def write_metric(_metrics_table, %Metrics.Sum{} = _metric, _string_name, value, _tags)
+      when not is_number(value), do: :ok
+
   def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
     generation = get_current_gen(metrics_table)
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
@@ -120,7 +125,9 @@ defmodule OtelMetricExporter.MetricStore do
     :ets.update_element(metrics_table, ets_key, {2, value}, {ets_key, value, nil})
   end
 
-  def write_metric(_metrics_table, %Metrics.Distribution{} = _metric, _string_name, value, _tags) when not is_number(value), do: :ok
+  def write_metric(_metrics_table, %Metrics.Distribution{} = _metric, _string_name, value, _tags)
+      when not is_number(value), do: :ok
+
   def write_metric(metrics_table, %Metrics.Distribution{} = metric, string_name, value, tags) do
     bucket = find_bucket(metric, value)
     generation = get_current_gen(metrics_table)

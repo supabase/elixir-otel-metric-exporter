@@ -54,15 +54,25 @@ defmodule OtelMetricExporter.PullProducer do
     # TODO: Pull with limit
     case MetricStore.pull(state.metric_store_name) do
       {:ok, []} ->
+        emit_telemetry(0, state.metric_store_name)
         {:noreply, [], schedule_tick(state)}
 
       {:ok, metrics} ->
         data_points_count = Enum.sum_by(metrics, &count_data_points/1)
+        emit_telemetry(data_points_count, state.metric_store_name)
         new_demand = max(state.pending_demand - data_points_count, 0)
         state = %{state | pending_demand: new_demand}
         state = if new_demand > 0, do: schedule_tick(state), else: state
         {:noreply, metrics, state}
     end
+  end
+
+  defp emit_telemetry(emitted, metric_store_name) do
+    :telemetry.execute(
+      [:otel_metric_exporter, :pull_producer, :pull],
+      %{emitted: emitted, remaining: MetricStore.record_count(metric_store_name)},
+      %{metric_store_name: metric_store_name}
+    )
   end
 
   defp count_data_points(%_metric{data: {_type, %_metric_type{data_points: points}}}),
