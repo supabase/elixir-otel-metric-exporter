@@ -41,7 +41,9 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                   otlp_protocol: :http_protobuf,
                   otlp_timeout: 10000,
                   export_callback: nil,
-                  max_table_memory: 2_000_000_000
+                  max_table_memory: 2_000_000_000,
+                  otlp_endpoint:  "",
+                  pull_mode: false
                 }}
     end
 
@@ -116,8 +118,7 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                 otlp_endpoint: "http://localhost:4318",
                 otlp_headers: %{"key1" => "value1", "key2" => "value2"},
                 otlp_timeout: 10
-              },
-              %{}} =
+              }, %{}} =
                OtelMetricExporter.OtelApi.Config.validate_for_scope(
                  %{logs: %{exporter: :otlp}},
                  :logs

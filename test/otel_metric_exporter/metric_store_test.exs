@@ -24,6 +24,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       metrics: [],
       finch_pool: TestFinch,
       retry: false,
+      pull_mode: false,
       name: @name
     }
 
@@ -161,7 +162,7 @@ defmodule OtelMetricExporter.MetricStoreTest do
       store_config: base_config,
       metric: metric
     } do
-      config = Map.put(base_config, :max_table_memory, 3200)
+      config = Map.put(base_config, :max_table_memory, 3000)
       start_supervised!({MetricStore, config})
 
       MetricStore.write_metric(@name, metric, 1, %{})

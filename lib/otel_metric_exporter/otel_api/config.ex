@@ -13,7 +13,8 @@ defmodule OtelMetricExporter.OtelApi.Config do
     :otlp_concurrent_requests,
     :hibernate_after,
     :spawn_opt,
-    :max_table_memory
+    :max_table_memory,
+    :pull_mode
   ]
 
   @type protocol :: :http_protobuf
@@ -22,6 +23,7 @@ defmodule OtelMetricExporter.OtelApi.Config do
   endpoint_opt = [
     otlp_endpoint: [
       type: :string,
+      default: "",
       doc: "Endpoint to send data to."
     ]
   ]
@@ -102,6 +104,15 @@ defmodule OtelMetricExporter.OtelApi.Config do
     spawn_opt: [
       type: {:or, [{:list, :any}, nil]},
       doc: "Pass :spawn_opt to all child GenServers"
+    ],
+    pull_mode: [
+      type: :boolean,
+      default: false,
+      doc: """
+      When true, MetricStore does not auto-export. Consumers drive drain via
+      `MetricStore.pull/1` (typically through `OtelMetricExporter.PullProducer`
+      plugged into a Broadway pipeline). Mutually exclusive with `export_callback`.
+      """
     ]
   ]
 
@@ -236,6 +247,14 @@ defmodule OtelMetricExporter.OtelApi.Config do
   def validate_for_scope(config, scope) when scope in [:logs, :metrics] do
     {provided, rest} = Map.split(config, Keyword.keys(@public_options) -- [:logs, :metrics])
 
+    with {:ok, with_overrides} <- defaults_with_overrides(provided, scope),
+         :ok <- validate_pull_and_export(with_overrides),
+         {:ok, valid_opts} <- validate_exporter(with_overrides) do
+      {:ok, struct!(__MODULE__, valid_opts), rest}
+    end
+  end
+
+  defp defaults_with_overrides(provided, scope) do
     with {:ok, defaults} <- defaults() do
       with_overrides =
         defaults
@@ -245,15 +264,48 @@ defmodule OtelMetricExporter.OtelApi.Config do
           &if(&1 == :resource, do: Map.merge(&2, &3), else: &3)
         )
 
-      case Map.get(with_overrides, :exporter) do
-        x when x in [:otlp, nil] ->
-          with {:ok, validated} <- NimbleOptions.validate(with_overrides, @single_scope_schema) do
-            {:ok, struct!(__MODULE__, validated), rest}
-          end
+      {:ok, with_overrides}
+    end
+  end
 
-        :none ->
-          {:ok, %__MODULE__{exporter: :none}, rest}
-      end
+  defp validate_endpoint(config) do
+    pull = Map.get(config, :pull_mode, false)
+    cb = Map.get(config, :export_callback)
+    endpoint = Map.get(config, :otlp_endpoint, "")
+
+    if not pull and cb == nil and endpoint == "" do
+      {:error,
+       %NimbleOptions.ValidationError{
+         key: :otlp_endpoint,
+         message: "otlp_endpoint cannot be empty unless pull_mode is on or export_callback is set"
+       }}
+    else
+      :ok
+    end
+  end
+
+  defp validate_pull_and_export(%{pull_mode: pull, export_callback: cb})
+       when pull and cb != nil do
+    {:error,
+     %NimbleOptions.ValidationError{
+       key: :export_callback,
+       message:
+         "pull_mode and export_callback are mutually exclusive; " <>
+           "set export_callback to nil when pull_mode is true"
+     }}
+  end
+
+  defp validate_pull_and_export(_config), do: :ok
+
+  defp validate_exporter(config) do
+    case Map.get(config, :exporter) do
+      x when x in [:otlp, nil] ->
+        with :ok <- validate_endpoint(config) do
+          NimbleOptions.validate(config, @single_scope_schema)
+        end
+
+      :none ->
+        {:ok, exporter: :none}
     end
   end
 
