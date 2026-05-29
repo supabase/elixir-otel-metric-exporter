@@ -67,9 +67,6 @@ defmodule OtelMetricExporter.PullProducer do
   end
 
   defp emit_telemetry(emitted, metric_store_name) do
-    dbg("Emit telemetry")
-    dbg(metric_store_name)
-    
     :telemetry.execute(
       [:otel_metric_exporter, :pull_producer, :pull],
       %{emitted: emitted, remaining: MetricStore.record_count(metric_store_name)},
