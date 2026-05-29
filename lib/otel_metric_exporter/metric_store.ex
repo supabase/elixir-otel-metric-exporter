@@ -195,7 +195,6 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def handle_call(:export_sync, _from, state) do
-    dbg("export sync")
     case export_metrics(state) do
       :ok ->
         {:reply, :ok, state}
@@ -266,7 +265,6 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def handle_info(:rotate_and_trim, state) do
-    dbg("Roating and trim")
     rotate_generation(state)
     Process.send_after(self(), :rotate_and_trim, state.config.export_period)
     {:noreply, state}
@@ -320,12 +318,9 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   defp export_metrics(%State{} = state) do
-    dbg("export metrics")
     current_gen = rotate_generation(state)
     earliest_gen = earliest_gen(state.generations_table)
     metrics = collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state)
-
-    dbg(metrics)
 
     case OtelApi.send_metrics(state.api, metrics) do
       :ok ->
