@@ -51,8 +51,7 @@ defmodule OtelMetricExporter.PullProducer do
   defp pull_and_emit(%{pending_demand: 0} = state), do: {:noreply, [], state}
 
   defp pull_and_emit(state) do
-    # TODO: Pull with limit
-    case MetricStore.pull(state.metric_store_name) do
+    case MetricStore.pull(state.metric_store_name, state.pending_demand) do
       {:ok, []} ->
         emit_telemetry(0, state.metric_store_name)
         {:noreply, [], schedule_tick(state)}
@@ -68,6 +67,9 @@ defmodule OtelMetricExporter.PullProducer do
   end
 
   defp emit_telemetry(emitted, metric_store_name) do
+    dbg("Emit telemetry")
+    dbg(metric_store_name)
+    
     :telemetry.execute(
       [:otel_metric_exporter, :pull_producer, :pull],
       %{emitted: emitted, remaining: MetricStore.record_count(metric_store_name)},

@@ -28,7 +28,7 @@ defmodule OtelMetricExporter.MetricStore do
 
   defmodule State do
     @moduledoc false
-    defstruct [:config, :api, :metrics, :metrics_table, :last_export, :generations_table]
+    defstruct [:config, :api, :metrics, :metrics_table, :last_export, :generations_table, :partial_gen]
 
     @type t :: %__MODULE__{
             config: map(),
@@ -36,7 +36,8 @@ defmodule OtelMetricExporter.MetricStore do
             metrics: list(),
             metrics_table: atom(),
             generations_table: :ets.tid(),
-            last_export: nil | DateTime.t()
+            last_export: nil | DateTime.t(),
+            partial_gen: non_neg_integer() | nil
           }
   end
 
@@ -60,7 +61,11 @@ defmodule OtelMetricExporter.MetricStore do
     generation = generation || get_current_gen(metrics_table)
 
     :ets.match_object(metrics_table, {{generation, :_, :_, :_, :_}, :_, :_})
-    |> Enum.reduce(%{}, fn
+    |> group_rows()
+  end
+
+  defp group_rows(rows) do
+    Enum.reduce(rows, %{}, fn
       {{_, name, :distribution, tags, bucket}, count, sum}, acc ->
         Map.update(
           acc,
@@ -85,10 +90,16 @@ defmodule OtelMetricExporter.MetricStore do
     GenServer.call(name, :export_sync, :infinity)
   end
 
-  def pull(name) do
+  def pull(name, limit \\ :infinity)
+
+  def pull(name, :infinity) do
     with {:ok, collector} <- GenServer.call(name, :prepare_to_collect) do
       collector.()
     end
+  end
+
+  def pull(name, limit) when is_integer(limit) and limit > 0 do
+    GenServer.call(name, {:prepare_to_collect, limit})
   end
 
   @spec record_count(atom()) :: non_neg_integer()
@@ -184,6 +195,7 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def handle_call(:export_sync, _from, state) do
+    dbg("export sync")
     case export_metrics(state) do
       :ok ->
         {:reply, :ok, state}
@@ -215,7 +227,46 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   @impl true
+  def handle_call({:prepare_to_collect, limit}, _from, state) do
+    {gen, state} =
+      if state.partial_gen != nil do
+        {state.partial_gen, state}
+      else
+        earliest_gen = bump_earliest_gen(state.metrics_table)
+        current_gen = get_current_gen(state.metrics_table)
+        if current_gen == earliest_gen, do: rotate_generation(state)
+        {earliest_gen, state}
+      end
+
+    gen_meta = lookup_generation(state, gen)
+    pattern = {{gen, :_, :_, :_, :_}, :_, :_}
+
+    metrics =
+      case :ets.match_object(state.metrics_table, pattern, limit) do
+        :"$end_of_table" ->
+          []
+
+        {objects, _continuation} ->
+          for obj <- objects, do: :ets.delete_object(state.metrics_table, obj)
+          collect_metrics_bounded(objects, gen_meta) |> transform_metrics(state)
+      end
+
+    state =
+      case :ets.match_object(state.metrics_table, pattern, 1) do
+        :"$end_of_table" ->
+          :ets.delete(state.generations_table, gen)
+          %{state | partial_gen: nil}
+
+        _ ->
+          %{state | partial_gen: gen}
+      end
+
+    {:reply, {:ok, metrics}, state}
+  end
+
+  @impl true
   def handle_info(:rotate_and_trim, state) do
+    dbg("Roating and trim")
     rotate_generation(state)
     Process.send_after(self(), :rotate_and_trim, state.config.export_period)
     {:noreply, state}
@@ -269,9 +320,12 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   defp export_metrics(%State{} = state) do
+    dbg("export metrics")
     current_gen = rotate_generation(state)
     earliest_gen = earliest_gen(state.generations_table)
     metrics = collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state)
+
+    dbg(metrics)
 
     case OtelApi.send_metrics(state.api, metrics) do
       :ok ->
@@ -294,6 +348,14 @@ defmodule OtelMetricExporter.MetricStore do
 
   defp collect_metrics(state, {gen, start, finish}) do
     get_metrics(state.metrics_table, gen)
+    |> Enum.map(fn {key, values} ->
+      tagged_values = Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)
+      {key, tagged_values}
+    end)
+  end
+
+  defp collect_metrics_bounded(rows, {_, start, finish}) do
+    group_rows(rows)
     |> Enum.map(fn {key, values} ->
       tagged_values = Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)
       {key, tagged_values}

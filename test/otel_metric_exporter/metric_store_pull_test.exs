@@ -17,6 +17,69 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     {:ok, store_config: config}
   end
 
+  describe "pull/2 with limit" do
+    setup %{store_config: config} do
+      metric = Metrics.sum("pull.test.sum")
+      config = %{config | metrics: [metric]}
+      {:ok, store: start_supervised!({MetricStore, config}), metric: metric}
+    end
+
+    test "limits the number of ETS rows returned per call" do
+      metric = Metrics.sum("pull.test.sum")
+
+      # Write 3 separate tag sets — each is a distinct ETS row
+      MetricStore.write_metric(@name, metric, 1, %{id: "a"})
+      MetricStore.write_metric(@name, metric, 2, %{id: "b"})
+      MetricStore.write_metric(@name, metric, 3, %{id: "c"})
+
+      # Limit to 1 row — only one tag set should come back
+      assert {:ok, first} = MetricStore.pull(@name, 1)
+      assert length(first) == 1
+
+      # Two rows still remain in the partially-drained generation
+      assert {:ok, second} = MetricStore.pull(@name, 2)
+      assert length(second) == 1
+
+      # Generation is now fully drained
+      assert {:ok, []} = MetricStore.pull(@name, 10)
+    end
+
+    test "resumes the same generation on successive bounded pulls" do
+      metric = Metrics.sum("pull.test.sum")
+
+      MetricStore.write_metric(@name, metric, 10, %{id: "x"})
+      MetricStore.write_metric(@name, metric, 20, %{id: "y"})
+
+      assert {:ok, _batch1} = MetricStore.pull(@name, 1)
+      assert {:ok, _batch2} = MetricStore.pull(@name, 1)
+
+      # After two single-row pulls the generation should be empty
+      assert {:ok, []} = MetricStore.pull(@name, 1)
+    end
+
+    test "pull with limit larger than available rows drains completely" do
+      metric = Metrics.sum("pull.test.sum")
+
+      MetricStore.write_metric(@name, metric, 5, %{id: "only"})
+
+      assert {:ok, metrics} = MetricStore.pull(@name, 1000)
+      assert length(metrics) == 1
+      assert {:ok, []} = MetricStore.pull(@name, 1000)
+    end
+
+    test "pull(:infinity) still works and drains whole generation" do
+      metric = Metrics.sum("pull.test.sum")
+
+      MetricStore.write_metric(@name, metric, 1, %{id: "a"})
+      MetricStore.write_metric(@name, metric, 2, %{id: "b"})
+
+      assert {:ok, metrics} = MetricStore.pull(@name, :infinity)
+      assert length(metrics) == 1
+
+      assert {:ok, []} = MetricStore.pull(@name, :infinity)
+    end
+  end
+
   describe "pull/1" do
     setup %{store_config: config} do
       metric = Metrics.sum("pull.test.sum")
