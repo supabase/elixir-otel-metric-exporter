@@ -28,16 +28,14 @@ defmodule OtelMetricExporter.MetricStore do
 
   defmodule State do
     @moduledoc false
-    defstruct [:config, :api, :metrics, :metrics_table, :last_export, :generations_table, :partial_gen]
+    defstruct [:config, :api, :metrics, :metrics_table, :generations_table]
 
     @type t :: %__MODULE__{
             config: map(),
             api: struct(),
             metrics: list(),
             metrics_table: atom(),
-            generations_table: :ets.tid(),
-            last_export: nil | DateTime.t(),
-            partial_gen: non_neg_integer() | nil
+            generations_table: :ets.tid()
           }
   end
 
@@ -90,17 +88,21 @@ defmodule OtelMetricExporter.MetricStore do
     GenServer.call(name, :export_sync, :infinity)
   end
 
-  def pull(name, limit \\ :infinity)
-
-  def pull(name, :infinity) do
-    with {:ok, collector} <- GenServer.call(name, :prepare_to_collect) do
-      collector.()
+  def pull(name) do
+    with {:ok, collector} <- prepare_to_collect(name) do
+      {:ok, metrics, :done} = collector.(:infinity)
+      {:ok, metrics}
     end
   end
 
-  def pull(name, limit) when is_integer(limit) and limit > 0 do
-    GenServer.call(name, {:prepare_to_collect, limit})
-  end
+  @doc """
+  Returns a resumable collector closure for the next available generation.
+
+  The closure has type `(limit :: pos_integer | :infinity) -> {:ok, [Metric.t()], :done | {:more, collector}}`.
+  Call it with a row limit to get a batch of metrics; repeat with the returned
+  `{:more, next_collector}` until `:done`. ETS cleanup is handled inside the closure.
+  """
+  def prepare_to_collect(name), do: GenServer.call(name, :prepare_to_collect)
 
   @spec record_count(atom()) :: non_neg_integer()
   def record_count(name), do: :ets.info(name, :size)
@@ -206,61 +208,13 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def handle_call(:prepare_to_collect, _from, state) do
-    current_gen = get_current_gen(state.metrics_table)
     earliest_gen = bump_earliest_gen(state.metrics_table)
-
-    if current_gen == earliest_gen do
-      rotate_generation(state)
-    end
+    current_gen = get_current_gen(state.metrics_table)
+    if current_gen == earliest_gen, do: rotate_generation(state)
 
     gen_meta = pop_generation(state, earliest_gen)
-    # Offload collection to a caller
-    collector = fn ->
-      # TODO: transform_metrics should format data for easy Logflare ingestion
-      metrics = collect_metrics(state, gen_meta) |> transform_metrics(state)
-      :ets.match_delete(state.metrics_table, {{earliest_gen, :_, :_, :_, :_}, :_, :_})
-      {:ok, metrics}
-    end
-
+    collector = make_collector(gen_meta, state.metrics_table, state.metrics)
     {:reply, {:ok, collector}, state}
-  end
-
-  @impl true
-  def handle_call({:prepare_to_collect, limit}, _from, state) do
-    {gen, state} =
-      if state.partial_gen != nil do
-        {state.partial_gen, state}
-      else
-        earliest_gen = bump_earliest_gen(state.metrics_table)
-        current_gen = get_current_gen(state.metrics_table)
-        if current_gen == earliest_gen, do: rotate_generation(state)
-        {earliest_gen, state}
-      end
-
-    gen_meta = lookup_generation(state, gen)
-    pattern = {{gen, :_, :_, :_, :_}, :_, :_}
-
-    metrics =
-      case :ets.match_object(state.metrics_table, pattern, limit) do
-        :"$end_of_table" ->
-          []
-
-        {objects, _continuation} ->
-          for obj <- objects, do: :ets.delete_object(state.metrics_table, obj)
-          collect_metrics_bounded(objects, gen_meta) |> transform_metrics(state)
-      end
-
-    state =
-      case :ets.match_object(state.metrics_table, pattern, 1) do
-        :"$end_of_table" ->
-          :ets.delete(state.generations_table, gen)
-          %{state | partial_gen: nil}
-
-        _ ->
-          %{state | partial_gen: gen}
-      end
-
-    {:reply, {:ok, metrics}, state}
   end
 
   @impl true
@@ -320,7 +274,7 @@ defmodule OtelMetricExporter.MetricStore do
   defp export_metrics(%State{} = state) do
     current_gen = rotate_generation(state)
     earliest_gen = earliest_gen(state.generations_table)
-    metrics = collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state)
+    metrics = collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state.metrics)
 
     case OtelApi.send_metrics(state.api, metrics) do
       :ok ->
@@ -357,15 +311,58 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
-  defp transform_metrics(raw_metrics, state) do
+  defp transform_metrics(raw_metrics, metrics) when is_list(metrics) do
     raw_metrics
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Enum.map(fn {{type, name}, grouped_values} ->
       metric =
-        Enum.find(state.metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
+        Enum.find(metrics, &(Enum.join(&1.name, ".") == name and metric_type(&1) == type))
 
       convert_metric(metric, List.flatten(grouped_values))
     end)
+  end
+
+
+  defp make_collector({nil, nil, nil}, _table, _metrics_config) do
+    fn _limit -> {:ok, [], :done} end
+  end
+
+  defp make_collector({gen, _, _} = gen_meta, table, metrics_config) do
+    fn limit ->
+      pattern = {{gen, :_, :_, :_, :_}, :_, :_}
+
+      {objects, has_more} =
+        case limit do
+          :infinity ->
+            objs = :ets.match_object(table, pattern)
+            {objs, false}
+
+          n when is_integer(n) and n > 0 ->
+            case :ets.match_object(table, pattern, n) do
+              :"$end_of_table" ->
+                {[], false}
+
+              {objs, _continuation} ->
+                for obj <- objs, do: :ets.delete_object(table, obj)
+                more = :ets.match_object(table, pattern, 1) != :"$end_of_table"
+                {objs, more}
+            end
+        end
+
+      if limit == :infinity do
+        :ets.match_delete(table, pattern)
+      end
+
+      metrics =
+        collect_metrics_bounded(objects, gen_meta)
+        |> transform_metrics(metrics_config)
+
+      if has_more do
+        {:ok, metrics, {:more, make_collector(gen_meta, table, metrics_config)}}
+      else
+        {:ok, metrics, :done}
+      end
+    end
   end
 
   defp convert_metric(

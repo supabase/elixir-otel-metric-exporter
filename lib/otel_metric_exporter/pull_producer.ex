@@ -1,18 +1,17 @@
 defmodule OtelMetricExporter.PullProducer do
   @moduledoc """
   GenStage producer that drains metrics from `OtelMetricExporter.MetricStore`
-  by calling `MetricStore.pull/1` on demand. Designed to be plugged into
-  a Broadway pipeline via `producer: [module: {OtelMetricExporter.PullProducer,
-  metric_store_name: :my_store}]`, but works with any GenStage consumer.
+  on demand. Designed to be plugged into a Broadway pipeline via
+  `producer: [module: {OtelMetricExporter.PullProducer, metric_store_name: :my_store}]`,
+  but works with any GenStage consumer.
 
-  ## Overflow behaviour
+  ## Design
 
-  `MetricStore.pull/1` drains all available metrics from ETS in one call. If
-  the number of metrics returned exceeds the current `pending_demand`, the
-  producer emits all of them anyway. GenStage consumers buffer the overflow.
-  This is the simplest correct behaviour and avoids leaving partially-drained
-  generations in ETS. Consumers that need strict demand respect should use a
-  small `pull_interval` to naturally rate-limit pull calls.
+  On each demand cycle the producer calls `MetricStore.prepare_to_collect/1` (one fast
+  GenServer call) to obtain a collector closure, then invokes the closure with the
+  current demand as the row limit. The closure runs entirely in the producer's process —
+  MetricStore is never blocked by ETS work. Partial generations are tracked by storing
+  the continuation closure in producer state; ETS cleanup is handled inside the closure.
   """
   use GenStage
 
@@ -30,7 +29,8 @@ defmodule OtelMetricExporter.PullProducer do
       metric_store_name: Keyword.fetch!(opts, :metric_store_name),
       pull_interval: Keyword.get(opts, :pull_interval, @default_pull_interval),
       pending_demand: 0,
-      tick_ref: nil
+      tick_ref: nil,
+      collector: nil
     }
 
     {:producer, state}
@@ -50,13 +50,28 @@ defmodule OtelMetricExporter.PullProducer do
 
   defp pull_and_emit(%{pending_demand: 0} = state), do: {:noreply, [], state}
 
-  defp pull_and_emit(state) do
-    case MetricStore.pull(state.metric_store_name, state.pending_demand) do
-      {:ok, []} ->
-        emit_telemetry(0, state.metric_store_name)
-        {:noreply, [], schedule_tick(state)}
+  defp pull_and_emit(%{collector: nil} = state) do
+    {:ok, collector} = MetricStore.prepare_to_collect(state.metric_store_name)
+    do_collect(state, collector)
+  end
 
-      {:ok, metrics} ->
+  defp pull_and_emit(%{collector: collector} = state) do
+    do_collect(state, collector)
+  end
+
+  defp do_collect(state, collector) do
+    case collector.(state.pending_demand) do
+      {:ok, [], :done} ->
+        emit_telemetry(0, state.metric_store_name)
+        {:noreply, [], schedule_tick(%{state | collector: nil})}
+
+      {:ok, metrics, done_or_more} ->
+        state =
+          case done_or_more do
+            :done -> %{state | collector: nil}
+            {:more, next_collector} -> %{state | collector: next_collector}
+          end
+
         data_points_count = Enum.sum_by(metrics, &count_data_points/1)
         emit_telemetry(data_points_count, state.metric_store_name)
         new_demand = max(state.pending_demand - data_points_count, 0)

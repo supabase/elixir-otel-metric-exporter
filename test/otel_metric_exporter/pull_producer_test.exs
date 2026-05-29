@@ -7,7 +7,7 @@ defmodule OtelMetricExporter.PullProducerTest do
 
   @store_name :pull_producer_test_store
 
-  # A minimal GenStage consumer that collects events into the test process.
+  # Minimal GenStage consumer — asks for demand once, forwards events to test process.
   defmodule TestConsumer do
     use GenStage
 
@@ -30,6 +30,32 @@ defmodule OtelMetricExporter.PullProducerTest do
     @impl true
     def handle_events(events, _from, state) do
       send(state.test_pid, {:events, events})
+      {:noreply, [], state}
+    end
+  end
+
+  # Consumer that re-asks after every batch — used to test partial-drain continuation.
+  defmodule GreedyConsumer do
+    use GenStage
+
+    def start_link(opts), do: GenStage.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts) do
+      {:consumer,
+       %{test_pid: Keyword.fetch!(opts, :test_pid), demand: Keyword.get(opts, :demand, 10)}}
+    end
+
+    @impl true
+    def handle_subscribe(:producer, _opts, from, state) do
+      GenStage.ask(from, state.demand)
+      {:manual, state}
+    end
+
+    @impl true
+    def handle_events(events, from, state) do
+      send(state.test_pid, {:events, events})
+      GenStage.ask(from, state.demand)
       {:noreply, [], state}
     end
   end
@@ -116,5 +142,73 @@ defmodule OtelMetricExporter.PullProducerTest do
 
     assert_receive {:events, events}, 500
     assert length(events) == 1
+  end
+
+  test "emits correct values from store", %{metric: metric} do
+    MetricStore.write_metric(@store_name, metric, 42, %{test: "val"})
+
+    {:ok, producer} =
+      GenStage.start_link(PullProducer, metric_store_name: @store_name, pull_interval: 50)
+
+    {:ok, consumer} = GenStage.start_link(TestConsumer, test_pid: self())
+    GenStage.sync_subscribe(consumer, to: producer, cancel: :temporary)
+
+    assert_receive {:events, [metric_proto]}, 500
+    [dp] = elem(metric_proto.data, 1).data_points
+    assert dp.value == {:as_int, 42}
+  end
+
+  test "continues emitting across multiple generations", %{metric: metric} do
+    MetricStore.write_metric(@store_name, metric, 10, %{gen: "0"})
+
+    {:ok, producer} =
+      GenStage.start_link(PullProducer, metric_store_name: @store_name, pull_interval: 50)
+
+    {:ok, consumer} = GenStage.start_link(TestConsumer, test_pid: self())
+    GenStage.sync_subscribe(consumer, to: producer, cancel: :temporary)
+
+    assert_receive {:events, batch1}, 500
+    assert length(batch1) == 1
+
+    # Write to the next generation — producer should pick it up on the next tick
+    MetricStore.write_metric(@store_name, metric, 20, %{gen: "1"})
+
+    assert_receive {:events, batch2}, 500
+    assert length(batch2) == 1
+
+    [dp] = elem(hd(batch2).data, 1).data_points
+    assert dp.value == {:as_int, 20}
+  end
+
+  test "no data lost when generation spans multiple demand cycles", %{metric: metric} do
+    # Write 11 distinct tag sets — each becomes one data point.
+    # With demand-per-cycle = 10, the first call returns 10 data points with
+    # {:more, continuation}; the second call (triggered by GreedyConsumer re-asking)
+    # uses the stored continuation and returns the remaining 1.
+    for i <- 1..11 do
+      MetricStore.write_metric(@store_name, metric, i, %{seq: i})
+    end
+
+    {:ok, producer} =
+      GenStage.start_link(PullProducer, metric_store_name: @store_name, pull_interval: 50)
+
+    {:ok, consumer} = GenStage.start_link(GreedyConsumer, test_pid: self(), demand: 10)
+    GenStage.sync_subscribe(consumer, to: producer, cancel: :temporary)
+
+    total_data_points =
+      Stream.repeatedly(fn ->
+        receive do
+          {:events, events} ->
+            events
+            |> Enum.flat_map(fn m -> elem(m.data, 1).data_points end)
+            |> length()
+        after
+          500 -> nil
+        end
+      end)
+      |> Stream.take_while(&(&1 != nil))
+      |> Enum.sum()
+
+    assert total_data_points == 11
   end
 end
