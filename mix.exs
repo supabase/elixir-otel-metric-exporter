@@ -46,7 +46,8 @@ defmodule OtelMetricExporter.MixProject do
       {:bypass, "~> 2.1", only: [:test]},
       {:opentelemetry, "~> 1.5", only: [:test]},
       {:mix_test_watch, "~> 1.0", only: [:dev, :test], runtime: false},
-      {:ex_doc, ">= 0.0.0", only: [:dev], runtime: false}
+      {:ex_doc, ">= 0.0.0", only: [:dev], runtime: false},
+      {:benchee, "~> 1.3", only: [:dev, :test], runtime: false}
     ]
   end
 
