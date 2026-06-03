@@ -219,6 +219,7 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def handle_info(:rotate_and_trim, state) do
+    dbg("Rotate and trim")
     rotate_generation(state)
     Process.send_after(self(), :rotate_and_trim, state.config.export_period)
     {:noreply, state}
