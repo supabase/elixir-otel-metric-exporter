@@ -153,9 +153,9 @@ defmodule OtelMetricExporter.PullProducerTest do
     {:ok, consumer} = GenStage.start_link(TestConsumer, test_pid: self())
     GenStage.sync_subscribe(consumer, to: producer, cancel: :temporary)
 
-    assert_receive {:events, [metric_proto]}, 500
-    [dp] = elem(metric_proto.data, 1).data_points
-    assert dp.value == {:as_int, 42}
+    assert_receive {:events, [event]}, 500
+    assert event["value"] == 42
+    assert event["event_message"] == "producer.test.sum"
   end
 
   test "continues emitting across multiple generations", %{metric: metric} do
@@ -176,15 +176,12 @@ defmodule OtelMetricExporter.PullProducerTest do
     assert_receive {:events, batch2}, 500
     assert length(batch2) == 1
 
-    [dp] = elem(hd(batch2).data, 1).data_points
-    assert dp.value == {:as_int, 20}
+    assert hd(batch2)["value"] == 20
   end
 
   test "no data lost when generation spans multiple demand cycles", %{metric: metric} do
-    # Write 11 distinct tag sets — each becomes one data point.
-    # With demand-per-cycle = 10, the first call returns 10 data points with
-    # {:more, continuation}; the second call (triggered by GreedyConsumer re-asking)
-    # uses the stored continuation and returns the remaining 1.
+    # 11 distinct tag sets → 11 ETS rows → 11 flat-map events.
+    # With demand 10: first call returns 10 events ({:more}), second returns 1 (:done).
     for i <- 1..11 do
       MetricStore.write_metric(@store_name, metric, i, %{seq: i})
     end
@@ -195,13 +192,10 @@ defmodule OtelMetricExporter.PullProducerTest do
     {:ok, consumer} = GenStage.start_link(GreedyConsumer, test_pid: self(), demand: 10)
     GenStage.sync_subscribe(consumer, to: producer, cancel: :temporary)
 
-    total_data_points =
+    total_events =
       Stream.repeatedly(fn ->
         receive do
-          {:events, events} ->
-            events
-            |> Enum.flat_map(fn m -> elem(m.data, 1).data_points end)
-            |> length()
+          {:events, events} -> length(events)
         after
           500 -> nil
         end
@@ -209,6 +203,44 @@ defmodule OtelMetricExporter.PullProducerTest do
       |> Stream.take_while(&(&1 != nil))
       |> Enum.sum()
 
-    assert total_data_points == 11
+    assert total_events == 11
+  end
+
+  describe "demand-unit mismatch regression" do
+    # Regression: with the old protobuf format, 1 Metric struct grouped many ETS rows,
+    # so demand was subtracted by data_points_count (large) not length(metrics) (small),
+    # driving new_demand to 0 after the first emit and deadlocking the producer.
+    #
+    # With flat maps: 1 ETS row = 1 event = 1 demand unit. Demand decreases correctly.
+
+    test "all 60 rows drain with continuous demand" do
+      # GreedyConsumer re-asks after each batch (mirrors Broadway's demand behaviour).
+      # 60 ETS rows → 60 flat-map events, all delivered across multiple demand cycles.
+      metric = Metrics.sum("producer.test.sum")
+
+      for i <- 1..60 do
+        MetricStore.write_metric(@store_name, metric, i, %{seq: i})
+      end
+
+      {:ok, producer} =
+        GenStage.start_link(PullProducer, metric_store_name: @store_name, pull_interval: 50)
+
+      {:ok, consumer} = GenStage.start_link(GreedyConsumer, test_pid: self(), demand: 10)
+      GenStage.sync_subscribe(consumer, to: producer, cancel: :temporary)
+
+      total_events =
+        Stream.repeatedly(fn ->
+          receive do
+            {:events, events} -> length(events)
+          after
+            500 -> nil
+          end
+        end)
+        |> Stream.take_while(&(&1 != nil))
+        |> Enum.sum()
+
+      assert total_events == 60
+      assert MetricStore.record_count(@store_name) == 0
+    end
   end
 end

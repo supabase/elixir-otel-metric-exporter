@@ -213,7 +213,7 @@ defmodule OtelMetricExporter.MetricStore do
     if current_gen == earliest_gen, do: rotate_generation(state)
 
     gen_meta = pop_generation(state, earliest_gen)
-    collector = make_collector(gen_meta, state.metrics_table, state.metrics)
+    collector = make_collector(gen_meta, state.metrics_table)
     {:reply, {:ok, collector}, state}
   end
 
@@ -303,13 +303,6 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
-  defp collect_metrics_bounded(rows, {_, start, finish}) do
-    group_rows(rows)
-    |> Enum.map(fn {key, values} ->
-      tagged_values = Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)
-      {key, tagged_values}
-    end)
-  end
 
   defp transform_metrics(raw_metrics, metrics) when is_list(metrics) do
     raw_metrics
@@ -323,11 +316,11 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
 
-  defp make_collector({nil, nil, nil}, _table, _metrics_config) do
+  defp make_collector({nil, nil, nil}, _table) do
     fn _limit -> {:ok, [], :done} end
   end
 
-  defp make_collector({gen, _, _} = gen_meta, table, metrics_config) do
+  defp make_collector({gen, _, _} = gen_meta, table) do
     fn limit ->
       pattern = {{gen, :_, :_, :_, :_}, :_, :_}
 
@@ -353,15 +346,67 @@ defmodule OtelMetricExporter.MetricStore do
         :ets.match_delete(table, pattern)
       end
 
-      metrics =
-        collect_metrics_bounded(objects, gen_meta)
-        |> transform_metrics(metrics_config)
+      events = Enum.map(objects, &row_to_event(&1, gen_meta))
 
       if has_more do
-        {:ok, metrics, {:more, make_collector(gen_meta, table, metrics_config)}}
+        {:ok, events, {:more, make_collector(gen_meta, table)}}
       else
-        {:ok, metrics, :done}
+        {:ok, events, :done}
       end
+    end
+  end
+
+  # Normalize tag values: the old protobuf path converted atoms to strings via encoding;
+  # we replicate that here so downstream consumers see the same attribute types.
+  defp normalize_tags(tags) when is_map(tags) do
+    Map.new(tags, fn
+      {k, v} when is_atom(v) -> {k, Atom.to_string(v)}
+      {k, v} -> {k, v}
+    end)
+  end
+
+  defp row_to_event({{_gen, name, :distribution, tags, bucket}, count, sum}, {_, start, finish}) do
+    %{
+      "event_message" => name,
+      "metric_type"   => "distribution",
+      "metadata"      => %{"type" => "metric"},
+      "bucket"        => bucket,
+      "count"         => count,
+      "sum"           => sum,
+      "attributes"    => normalize_tags(tags),
+      "start_time"    => start,
+      "timestamp"     => finish
+    }
+  end
+
+  @sum_temporality "cumulative"
+
+  defp row_to_event({{_gen, name, type, tags, _}, value, _}, {_, start, finish}) do
+    base = %{
+      "event_message" => name,
+      "metric_type"   => Atom.to_string(type),
+      "metadata"      => %{"type" => "metric"},
+      "value"         => value,
+      "attributes"    => normalize_tags(tags),
+      "start_time"    => start,
+      "timestamp"     => finish
+    }
+
+    case type do
+      :counter ->
+        Map.merge(base, %{
+          "aggregation_temporality" => @sum_temporality,
+          "is_monotonic" => true
+        })
+
+      :sum ->
+        Map.merge(base, %{
+          "aggregation_temporality" => @sum_temporality,
+          "is_monotonic" => false
+        })
+
+      _ ->
+        base
     end
   end
 

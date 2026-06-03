@@ -46,10 +46,8 @@ defmodule RealisticConsumer do
 
   @impl true
   def handle_events(events, _from, state) do
-    dp_count =
-      Enum.reduce(events, 0, fn %{data: {_kind, %{data_points: dps}}}, acc ->
-        acc + length(dps)
-      end)
+    # Each event is now a flat map (one per ETS row = one data point)
+    dp_count = length(events)
 
     :atomics.add(state.dp_counter, 1, dp_count)
     :atomics.add(state.cycle_counter, 1, 1)

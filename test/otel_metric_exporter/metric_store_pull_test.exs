@@ -29,12 +29,22 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       assert {:ok, [], :done} = collector.(100)
     end
 
-    test "collector returns all metrics with :infinity limit" do
+    test "collector returns one flat map per ETS row with :infinity limit" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 5, %{id: "a"})
 
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
-      assert {:ok, [%{name: "pull.test.sum"}], :done} = collector.(:infinity)
+      assert {:ok, [event], :done} = collector.(:infinity)
+
+      assert event["event_message"] == "pull.test.sum"
+      assert event["metric_type"] == "sum"
+      assert event["value"] == 5
+      assert event["attributes"] == %{id: "a"}
+      assert is_integer(event["start_time"])
+      assert is_integer(event["timestamp"])
+      assert event["aggregation_temporality"] == "cumulative"
+      assert event["is_monotonic"] == false
+      assert event["metadata"] == %{"type" => "metric"}
     end
 
     test "bounded drain: collector returns {:more, next} when rows remain" do
@@ -45,21 +55,16 @@ defmodule OtelMetricExporter.MetricStorePullTest do
 
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
 
-      # limit 1 — one row comes back, two remain
+      # limit 1 — one row (one flat map) comes back, two remain
       assert {:ok, batch1, {:more, c2}} = collector.(1)
       assert length(batch1) == 1
 
-      # limit 10 — drains the remaining two rows in one shot
+      # limit 10 — drains the remaining two rows (two flat maps)
       assert {:ok, batch2, :done} = c2.(10)
-      assert length(batch2) == 1
+      assert length(batch2) == 2
 
-      # total data points across both batches
-      total_points =
-        (batch1 ++ batch2)
-        |> Enum.flat_map(fn m -> elem(m.data, 1).data_points end)
-        |> length()
-
-      assert total_points == 3
+      # three rows written → three flat maps total
+      assert length(batch1) + length(batch2) == 3
     end
 
     test "after :done, next prepare_to_collect starts a fresh generation" do
@@ -93,10 +98,9 @@ defmodule OtelMetricExporter.MetricStorePullTest do
 
       # Next cycle picks up the "new" write from gen 1
       {:ok, c3} = MetricStore.prepare_to_collect(@name)
-      assert {:ok, [metric3], :done} = c3.(:infinity)
+      assert {:ok, [event3], :done} = c3.(:infinity)
 
-      [dp] = elem(metric3.data, 1).data_points
-      assert dp.value == {:as_int, 99}
+      assert event3["value"] == 99
     end
 
     test "full lifecycle across two generations" do
@@ -104,14 +108,14 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       MetricStore.write_metric(@name, metric, 10, %{id: "g0"})
 
       {:ok, c0} = MetricStore.prepare_to_collect(@name)
-      assert {:ok, [m0], :done} = c0.(:infinity)
-      assert [%{value: {:as_int, 10}}] = elem(m0.data, 1).data_points
+      assert {:ok, [e0], :done} = c0.(:infinity)
+      assert e0["value"] == 10
 
       MetricStore.write_metric(@name, metric, 20, %{id: "g1"})
 
       {:ok, c1} = MetricStore.prepare_to_collect(@name)
-      assert {:ok, [m1], :done} = c1.(:infinity)
-      assert [%{value: {:as_int, 20}}] = elem(m1.data, 1).data_points
+      assert {:ok, [e1], :done} = c1.(:infinity)
+      assert e1["value"] == 20
     end
   end
 

@@ -48,6 +48,7 @@ defmodule OtelMetricExporter.PullProducer do
     pull_and_emit(state)
   end
 
+  # No demand — respect backpressure. Rows stay in ETS until consumers ask for more.
   defp pull_and_emit(%{pending_demand: 0} = state), do: {:noreply, [], state}
 
   defp pull_and_emit(%{collector: nil} = state) do
@@ -65,19 +66,21 @@ defmodule OtelMetricExporter.PullProducer do
         emit_telemetry(0, state.metric_store_name)
         {:noreply, [], schedule_tick(%{state | collector: nil})}
 
-      {:ok, metrics, done_or_more} ->
+      {:ok, events, done_or_more} ->
         state =
           case done_or_more do
             :done -> %{state | collector: nil}
             {:more, next_collector} -> %{state | collector: next_collector}
           end
 
-        data_points_count = Enum.sum_by(metrics, &count_data_points/1)
-        emit_telemetry(data_points_count, state.metric_store_name)
-        new_demand = max(state.pending_demand - data_points_count, 0)
+        # Each event is one flat map corresponding to one ETS row — demand and
+        # GenStage event units are now aligned (1 event = 1 demand unit).
+        count = length(events)
+        emit_telemetry(count, state.metric_store_name)
+        new_demand = max(state.pending_demand - count, 0)
         state = %{state | pending_demand: new_demand}
-        state = if new_demand > 0, do: schedule_tick(state), else: state
-        {:noreply, metrics, state}
+        state = if new_demand > 0 or state.collector != nil, do: schedule_tick(state), else: state
+        {:noreply, events, state}
     end
   end
 
@@ -88,9 +91,6 @@ defmodule OtelMetricExporter.PullProducer do
       %{metric_store_name: metric_store_name}
     )
   end
-
-  defp count_data_points(%_metric{data: {_type, %_metric_type{data_points: points}}}),
-    do: length(points)
 
   defp schedule_tick(%{tick_ref: ref} = state) when is_reference(ref), do: state
 
