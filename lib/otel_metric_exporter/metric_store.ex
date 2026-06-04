@@ -393,8 +393,7 @@ defmodule OtelMetricExporter.MetricStore do
       end)
 
     if dist_rows != [] do
-      names = dist_rows |> Enum.map(fn {{_, name, _, _, _}, _, _} -> name end) |> Enum.uniq()
-      Logger.warning("Pull mode does not support distribution metrics — dropping rows for: #{inspect(names)}")
+      Logger.warning("Pull mode does not support distribution metrics — dropping rows")
     end
 
     Enum.map(simple_rows, &row_to_event(&1, gen_meta))
