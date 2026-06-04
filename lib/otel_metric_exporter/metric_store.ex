@@ -89,9 +89,14 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   def pull(name) do
-    with {:ok, collector} <- GenServer.call(name, :force_rotate_and_collect) do
-      {:ok, metrics, :done} = collector.(:infinity)
-      {:ok, metrics}
+    # Queue a rotation before collecting. Since GenServer processes messages in
+    # order, the rotation completes before prepare_to_collect is handled.
+    send(name, :rotate_and_trim)
+    case prepare_to_collect(name) do
+      {:ok, nil}       -> {:ok, []}
+      {:ok, collector} ->
+        {:ok, metrics, :done} = collector.(:infinity)
+        {:ok, metrics}
     end
   end
 
@@ -204,20 +209,6 @@ defmodule OtelMetricExporter.MetricStore do
       error ->
         {:reply, error, state}
     end
-  end
-
-  # One-shot drain: rotates the current generation if needed then collects.
-  # Used by pull/1 (testing, manual drain). Not for the streaming pipeline.
-  @impl true
-  def handle_call(:force_rotate_and_collect, _from, state) do
-    current_gen     = get_current_gen(state.metrics_table)
-    next_to_collect = peek_earliest_gen(state.metrics_table)
-    if current_gen == next_to_collect, do: rotate_generation(state)
-
-    earliest_gen = bump_earliest_gen(state.metrics_table)
-    gen_meta     = pop_generation(state, earliest_gen)
-    collector    = make_collector(gen_meta, state.metrics_table, state.config.name)
-    {:reply, {:ok, collector}, state}
   end
 
   @impl true
