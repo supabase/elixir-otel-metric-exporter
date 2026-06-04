@@ -17,7 +17,8 @@ Process.flag(:trap_exit, true)
 num_writers          = 4
 run_duration_ms      = 5_000
 write_batch          = 50
-pull_interval_ms     = 200
+pull_interval_ms     = 1000
+export_period = 2000
 # Mirror the previous GenStage config: max_demand=50_000, consumer_batch_size=50_000.
 # 1 processor → 1 batcher means Broadway sends exactly batch_size demand to the producer.
 # Batch fills immediately when 50k events arrive so batch_timeout rarely triggers.
@@ -108,7 +109,7 @@ IO.puts("")
 
 {:ok, store_pid} =
   MetricStore.start_link(%{
-    export_period: 1000,
+    export_period: export_period,
     metrics: [metric],
     name: store_name,
     pull_mode: true

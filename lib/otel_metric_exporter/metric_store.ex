@@ -216,7 +216,7 @@ defmodule OtelMetricExporter.MetricStore do
 
     earliest_gen = bump_earliest_gen(state.metrics_table)
     gen_meta     = pop_generation(state, earliest_gen)
-    collector    = make_collector(gen_meta, state.metrics_table)
+    collector    = make_collector(gen_meta, state.metrics_table, state.config.name)
     {:reply, {:ok, collector}, state}
   end
 
@@ -231,11 +231,20 @@ defmodule OtelMetricExporter.MetricStore do
       {:reply, {:ok, nil }, state}
     else
       # Claim the next sealed generation and return a collector for it.
+      # Use lookup (not pop) so the entry stays in generations_table until
+      # the collector is fully drained — allowing trim_metrics_table to find
+      # and clean up rows if the collector is abandoned under memory pressure.
       earliest_gen = bump_earliest_gen(state.metrics_table)
-      gen_meta     = pop_generation(state, earliest_gen)
-      collector    = make_collector(gen_meta, state.metrics_table)
+      gen_meta     = lookup_generation(state, earliest_gen)
+      collector    = make_collector(gen_meta, state.metrics_table, state.config.name)
       {:reply, {:ok, collector}, state}
     end
+  end
+
+  @impl true
+  def handle_cast({:release_generation, gen}, state) do
+    :ets.delete(state.generations_table, gen)
+    {:noreply, state}
   end
 
   @impl true
@@ -337,11 +346,9 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
 
-  defp make_collector({nil, nil, nil}, _table) do
-    fn _limit -> {:ok, [], :done} end
-  end
+  defp make_collector({nil, nil, nil}, _table, _store), do: nil
 
-  defp make_collector({gen, _, _} = gen_meta, table) do
+  defp make_collector({gen, _, _} = gen_meta, table, store) do
     fn limit ->
       pattern = {{gen, :_, :_, :_, :_}, :_, :_}
 
@@ -370,8 +377,11 @@ defmodule OtelMetricExporter.MetricStore do
       events = Enum.map(objects, &row_to_event(&1, gen_meta))
 
       if has_more do
-        {:ok, events, {:more, make_collector(gen_meta, table)}}
+        {:ok, events, {:more, make_collector(gen_meta, table, store)}}
       else
+        # All rows drained — release the generations_table entry via cast so
+        # trim_metrics_table can no longer see it and the gen is fully cleaned up.
+        GenServer.cast(store, {:release_generation, gen})
         {:ok, events, :done}
       end
     end

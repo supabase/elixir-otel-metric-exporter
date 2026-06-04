@@ -73,13 +73,14 @@ defmodule OtelMetricExporter.PullProducer do
     do_collect(state, collector)
   end
 
-  defp do_collect(%{pending_demand: demand} = state, nil) when demand > 0 do
-    {:noreply, [], schedule_tick(state)}
+  defp do_collect(state, collector, out \\ [])
+  defp do_collect(%{pending_demand: demand} = state, nil, out) when demand > 0 do
+    {:noreply, out, schedule_tick(state)}
   end
 
-  defp do_collect(state, nil), do: {:noreply, [], state}
+  defp do_collect(state, nil, out), do: {:noreply, out, state}
 
-  defp do_collect(state, collector) do
+  defp do_collect(state, collector, out) do
     case collector.(state.pending_demand) do
       {:ok, events, done_or_more} ->
         state =
@@ -96,9 +97,12 @@ defmodule OtelMetricExporter.PullProducer do
         # Schedule next tick only when there is remaining demand.
         # If collector has more rows but demand is zero, skip the tick —
         # the stored collector will be used when demand arrives via handle_demand.
-        state = if new_demand > 0, do: schedule_tick(state), else: state
-
-        {:noreply, events, state}
+        case state do
+          %{pending_demand: d, collector: nil} when d > 0 -> 
+            {:ok, collector} = MetricStore.prepare_to_collect(state.metric_store_name)
+            do_collect(state, collector, out ++ events)
+          state -> {:noreply, out ++ events, state}
+        end
     end
   end
 
