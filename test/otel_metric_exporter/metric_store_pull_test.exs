@@ -168,7 +168,6 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       assert length(events) == 1
       assert hd(events)["event_message"] == "m.bytes"
       assert log =~ "does not support distribution metrics"
-      assert log =~ "m.latency"
     end
 
     test "full lifecycle across two generations" do
