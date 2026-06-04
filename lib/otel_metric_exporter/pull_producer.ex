@@ -38,11 +38,11 @@ defmodule OtelMetricExporter.PullProducer do
   def init(opts) do
     state = %{
       metric_store_name: Keyword.fetch!(opts, :metric_store_name),
-      pull_interval:     Keyword.get(opts, :pull_interval, @default_pull_interval),
-      pending_demand:    0,
-      tick_ref:          nil,
-      collector:         nil,
-      last_tick_at:      System.monotonic_time(:millisecond)
+      pull_interval: Keyword.get(opts, :pull_interval, @default_pull_interval),
+      pending_demand: 0,
+      tick_ref: nil,
+      collector: nil,
+      last_tick_at: System.monotonic_time(:millisecond)
     }
 
     {:producer, state}
@@ -74,6 +74,7 @@ defmodule OtelMetricExporter.PullProducer do
   end
 
   defp do_collect(state, collector, out \\ [])
+
   defp do_collect(%{pending_demand: demand} = state, nil, out) when demand > 0 do
     {:noreply, out, schedule_tick(state)}
   end
@@ -85,23 +86,25 @@ defmodule OtelMetricExporter.PullProducer do
       {:ok, events, done_or_more} ->
         state =
           case done_or_more do
-            :done              -> %{state | collector: nil}
+            :done -> %{state | collector: nil}
             {:more, next_coll} -> %{state | collector: next_coll}
           end
 
-        count      = length(events)
+        count = length(events)
         emit_telemetry(count, state.metric_store_name)
         new_demand = max(state.pending_demand - count, 0)
-        state      = %{state | pending_demand: new_demand}
+        state = %{state | pending_demand: new_demand}
 
         # Schedule next tick only when there is remaining demand.
         # If collector has more rows but demand is zero, skip the tick —
         # the stored collector will be used when demand arrives via handle_demand.
         case state do
-          %{pending_demand: d, collector: nil} when d > 0 -> 
+          %{pending_demand: d, collector: nil} when d > 0 ->
             {:ok, collector} = MetricStore.prepare_to_collect(state.metric_store_name)
             do_collect(state, collector, out ++ events)
-          state -> {:noreply, out ++ events, state}
+
+          state ->
+            {:noreply, out ++ events, state}
         end
     end
   end
@@ -121,8 +124,8 @@ defmodule OtelMetricExporter.PullProducer do
     # Account for time already elapsed since the last tick so the effective
     # drain interval stays close to pull_interval even when processing is slow.
     elapsed = System.monotonic_time(:millisecond) - state.last_tick_at
-    delay   = max(state.pull_interval - elapsed, 0)
-    ref     = Process.send_after(self(), :tick, delay)
+    delay = max(state.pull_interval - elapsed, 0)
+    ref = Process.send_after(self(), :tick, delay)
     %{state | tick_ref: ref}
   end
 end

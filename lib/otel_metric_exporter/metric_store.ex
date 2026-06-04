@@ -92,8 +92,11 @@ defmodule OtelMetricExporter.MetricStore do
     # Queue a rotation before collecting. Since GenServer processes messages in
     # order, the rotation completes before prepare_to_collect is handled.
     send(name, :rotate_and_trim)
+
     case prepare_to_collect(name) do
-      {:ok, nil}       -> {:ok, []}
+      {:ok, nil} ->
+        {:ok, []}
+
       {:ok, collector} ->
         {:ok, metrics, :done} = collector.(:infinity)
         {:ok, metrics}
@@ -213,21 +216,21 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def handle_call(:prepare_to_collect, _from, state) do
-    current_gen  = get_current_gen(state.metrics_table)
+    current_gen = get_current_gen(state.metrics_table)
     next_to_collect = peek_earliest_gen(state.metrics_table)
 
     if current_gen == next_to_collect do
       # No sealed generation available yet — rotate_and_trim has not fired.
       # Return an empty collector so the producer backs off until export_period elapses.
-      {:reply, {:ok, nil }, state}
+      {:reply, {:ok, nil}, state}
     else
       # Claim the next sealed generation and return a collector for it.
       # Use lookup (not pop) so the entry stays in generations_table until
       # the collector is fully drained — allowing trim_metrics_table to find
       # and clean up rows if the collector is abandoned under memory pressure.
       earliest_gen = bump_earliest_gen(state.metrics_table)
-      gen_meta     = lookup_generation(state, earliest_gen)
-      collector    = make_collector(gen_meta, state.metrics_table, state.config.name)
+      gen_meta = lookup_generation(state, earliest_gen)
+      collector = make_collector(gen_meta, state.metrics_table, state.config.name)
       {:reply, {:ok, collector}, state}
     end
   end
@@ -295,7 +298,9 @@ defmodule OtelMetricExporter.MetricStore do
   defp export_metrics(%State{} = state) do
     current_gen = rotate_generation(state)
     earliest_gen = earliest_gen(state.generations_table)
-    metrics = collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state.metrics)
+
+    metrics =
+      collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state.metrics)
 
     case OtelApi.send_metrics(state.api, metrics) do
       :ok ->
@@ -324,7 +329,6 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
-
   defp transform_metrics(raw_metrics, metrics) when is_list(metrics) do
     raw_metrics
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
@@ -335,7 +339,6 @@ defmodule OtelMetricExporter.MetricStore do
       convert_metric(metric, List.flatten(grouped_values))
     end)
   end
-
 
   defp make_collector({nil, nil, nil}, _table, _store), do: nil
 
@@ -390,14 +393,14 @@ defmodule OtelMetricExporter.MetricStore do
   defp row_to_event({{_gen, name, :distribution, tags, bucket}, count, sum}, {_, start, finish}) do
     %{
       "event_message" => name,
-      "metric_type"   => "distribution",
-      "metadata"      => %{"type" => "metric"},
-      "bucket"        => bucket,
-      "count"         => count,
-      "sum"           => sum,
-      "attributes"    => normalize_tags(tags),
-      "start_time"    => start,
-      "timestamp"     => finish
+      "metric_type" => "distribution",
+      "metadata" => %{"type" => "metric"},
+      "bucket" => bucket,
+      "count" => count,
+      "sum" => sum,
+      "attributes" => normalize_tags(tags),
+      "start_time" => start,
+      "timestamp" => finish
     }
   end
 
@@ -406,19 +409,21 @@ defmodule OtelMetricExporter.MetricStore do
   defp row_to_event({{_gen, name, type, tags, _}, value, _}, {_, start, finish}) do
     base = %{
       "event_message" => name,
-      "metric_type"   => Atom.to_string(type),
-      "metadata"      => %{"type" => "metric"},
-      "value"         => value,
-      "attributes"    => normalize_tags(tags),
-      "start_time"    => start,
-      "timestamp"     => finish
+      "metric_type" => Atom.to_string(type),
+      "metadata" => %{"type" => "metric"},
+      "value" => value,
+      "attributes" => normalize_tags(tags),
+      "start_time" => start,
+      "timestamp" => finish
     }
 
     case type do
       :counter ->
         Map.merge(base, %{"aggregation_temporality" => @sum_temporality, "is_monotonic" => true})
+
       :sum ->
         Map.merge(base, %{"aggregation_temporality" => @sum_temporality, "is_monotonic" => false})
+
       _ ->
         base
     end

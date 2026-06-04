@@ -42,7 +42,7 @@ defmodule OtelMetricExporter.OtelApi.ConfigTest do
                   otlp_timeout: 10000,
                   export_callback: nil,
                   max_table_memory: 2_000_000_000,
-                  otlp_endpoint:  "",
+                  otlp_endpoint: "",
                   pull_mode: false
                 }}
     end
