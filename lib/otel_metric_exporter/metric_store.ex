@@ -368,7 +368,7 @@ defmodule OtelMetricExporter.MetricStore do
         :ets.match_delete(table, pattern)
       end
 
-      events = Enum.map(objects, &row_to_event(&1, gen_meta))
+      events = rows_to_events(objects, gen_meta)
 
       if has_more do
         {:ok, events, {:more, make_collector(gen_meta, table, store)}}
@@ -381,6 +381,25 @@ defmodule OtelMetricExporter.MetricStore do
     end
   end
 
+  # Converts a batch of raw ETS rows to ingestion events.
+  # Distribution metrics are not supported in pull mode — the collector does not
+  # have access to the bucket bounds (stored in Metrics.Distribution reporter_options,
+  # not in ETS) needed to reconstruct a well-formed histogram event.
+  defp rows_to_events(rows, gen_meta) do
+    {dist_rows, simple_rows} =
+      Enum.split_with(rows, fn
+        {{_, _, :distribution, _, _}, _, _} -> true
+        _ -> false
+      end)
+
+    if dist_rows != [] do
+      names = dist_rows |> Enum.map(fn {{_, name, _, _, _}, _, _} -> name end) |> Enum.uniq()
+      Logger.warning("Pull mode does not support distribution metrics — dropping rows for: #{inspect(names)}")
+    end
+
+    Enum.map(simple_rows, &row_to_event(&1, gen_meta))
+  end
+
   # Normalize tag values: the old protobuf path converted atoms to strings via encoding;
   # we replicate that here so downstream consumers see the same attribute types.
   defp normalize_tags(tags) when is_map(tags) do
@@ -390,10 +409,15 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
+  # metric_type strings must match what OtelMetric.handle_metric produced via the
+  # old protobuf path so downstream BigQuery schemas stay consistent:
+  #   :distribution → "histogram"  (was {:histogram, ...})
+  #   :last_value   → "gauge"      (was {:gauge, ...})
+  #   :counter/:sum → "sum"        (both became {:sum, ...})
   defp row_to_event({{_gen, name, :distribution, tags, bucket}, count, sum}, {_, start, finish}) do
     %{
       "event_message" => name,
-      "metric_type" => "distribution",
+      "metric_type" => "histogram",
       "metadata" => %{"type" => "metric"},
       "bucket" => bucket,
       "count" => count,
@@ -404,30 +428,35 @@ defmodule OtelMetricExporter.MetricStore do
     }
   end
 
-  @sum_temporality "cumulative"
-
-  defp row_to_event({{_gen, name, type, tags, _}, value, _}, {_, start, finish}) do
-    base = %{
+  defp row_to_event({{_gen, name, :last_value, tags, _}, value, _}, {_, start, finish}) do
+    %{
       "event_message" => name,
-      "metric_type" => Atom.to_string(type),
+      "metric_type" => "gauge",
       "metadata" => %{"type" => "metric"},
       "value" => value,
       "attributes" => normalize_tags(tags),
       "start_time" => start,
       "timestamp" => finish
     }
-
-    case type do
-      :counter ->
-        Map.merge(base, %{"aggregation_temporality" => @sum_temporality, "is_monotonic" => true})
-
-      :sum ->
-        Map.merge(base, %{"aggregation_temporality" => @sum_temporality, "is_monotonic" => false})
-
-      _ ->
-        base
-    end
   end
+
+  @sum_temporality "cumulative"
+
+  defp row_to_event({{_gen, name, type, tags, _}, value, _}, {_, start, finish})
+       when type in [:counter, :sum] do
+    %{
+      "event_message" => name,
+      "metric_type" => "sum",
+      "metadata" => %{"type" => "metric"},
+      "aggregation_temporality" => @sum_temporality,
+      "is_monotonic" => type == :counter,
+      "value" => value,
+      "attributes" => normalize_tags(tags),
+      "start_time" => start,
+      "timestamp" => finish
+    }
+  end
+
 
   defp convert_metric(
          %{name: name, description: description, unit: unit} = metric,

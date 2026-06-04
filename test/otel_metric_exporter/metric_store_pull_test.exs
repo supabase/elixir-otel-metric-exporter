@@ -114,6 +114,63 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       assert event3["value"] == 99
     end
 
+    test "metric_type mapping matches old OtelMetric.handle_metric output" do
+      # Verify the type strings match what the old protobuf → handle_metric path produced
+      # so BigQuery schemas and existing queries remain compatible.
+      tags = %{id: "t"}
+
+      counter  = Metrics.counter("m.counter")
+      sum      = Metrics.sum("m.sum")
+      gauge    = Metrics.last_value("m.gauge")
+
+      MetricStore.write_metric(@name, counter, 1, tags)
+      MetricStore.write_metric(@name, sum, 10, tags)
+      MetricStore.write_metric(@name, gauge, 99, tags)
+      rotate(@name)
+      {:ok, collector} = MetricStore.prepare_to_collect(@name)
+      {:ok, events, :done} = collector.(:infinity)
+
+      by_name = Map.new(events, fn e -> {e["event_message"], e} end)
+
+      # Counter → "sum" (was {:sum, is_monotonic: true} in protobuf)
+      assert by_name["m.counter"]["metric_type"] == "sum"
+      assert by_name["m.counter"]["is_monotonic"] == true
+      assert by_name["m.counter"]["aggregation_temporality"] == "cumulative"
+
+      # Sum → "sum" (was {:sum, is_monotonic: false} in protobuf)
+      assert by_name["m.sum"]["metric_type"] == "sum"
+      assert by_name["m.sum"]["is_monotonic"] == false
+      assert by_name["m.sum"]["aggregation_temporality"] == "cumulative"
+
+      # LastValue → "gauge" (was {:gauge, ...} in protobuf)
+      assert by_name["m.gauge"]["metric_type"] == "gauge"
+      refute Map.has_key?(by_name["m.gauge"], "is_monotonic")
+    end
+
+    test "distribution rows are dropped with a warning in pull mode" do
+      # Distribution metrics require bucket bounds (stored in Metrics.Distribution
+      # reporter_options, not in ETS) to reconstruct a valid histogram event.
+      # Pull mode drops them rather than emitting broken partial data.
+      metric = Metrics.distribution("m.latency", reporter_options: [buckets: [10, 100, 1000]])
+      sum    = Metrics.sum("m.bytes")
+
+      MetricStore.write_metric(@name, metric, 50, %{"user_id" => "a"})
+      MetricStore.write_metric(@name, sum, 100, %{"user_id" => "a"})
+      rotate(@name)
+      {:ok, collector} = MetricStore.prepare_to_collect(@name)
+
+      import ExUnit.CaptureLog
+      {events, log} = with_log(fn ->
+        {:ok, evts, :done} = collector.(:infinity)
+        evts
+      end)
+
+      assert length(events) == 1
+      assert hd(events)["event_message"] == "m.bytes"
+      assert log =~ "does not support distribution metrics"
+      assert log =~ "m.latency"
+    end
+
     test "full lifecycle across two generations" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 10, %{id: "g0"})
