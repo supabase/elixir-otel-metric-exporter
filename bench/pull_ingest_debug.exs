@@ -1,10 +1,17 @@
-# Pull-mode benchmark using Broadway — matching the IngestPipeline architecture.
+# Pull-mode benchmark with bounded user cardinality and production-style grouping.
 #
-# PullProducer → Broadway processors → Broadway batchers → handle_batch (write sim)
-# Samples ETS size, generation counts, and producer internals every 50ms.
+# Extends pull_debug.exs with:
+#   - num_users: fixed tag space so writes accumulate into the same ETS rows (like production)
+#   - handle_batch groups by user_id and applies write_delay_ms per group,
+#     mirroring IngestPipeline.ingest_grouped_metrics
+#
+# Use num_users to model different fleet sizes. With num_users=1000 and 4 metrics,
+# ETS never exceeds ~4000 rows regardless of write rate.
+#
+# Compare throughput vs pull_debug.exs to see grouping overhead.
 #
 # Run with:
-#   mix run bench/pull_debug.exs
+#   mix run bench/pull_ingest_debug.exs
 
 alias Telemetry.Metrics
 alias OtelMetricExporter.MetricStore
@@ -17,35 +24,31 @@ Process.flag(:trap_exit, true)
 num_writers          = 4
 run_duration_ms      = 5_000
 write_batch          = 50
-pull_interval_ms     = 200
-# Mirror the previous GenStage config: max_demand=50_000, consumer_batch_size=50_000.
-# 1 processor → 1 batcher means Broadway sends exactly batch_size demand to the producer.
-# Batch fills immediately when 50k events arrive so batch_timeout rarely triggers.
+num_users            = 100    # bounded tag cardinality — rows ≤ num_users per generation
+pull_interval_ms     = 1000
 batch_size           = 10_000
 batch_timeout_ms     = 500
 processor_concurrency = 4
 batcher_concurrency   = 4
-write_delay_ms       = 20         # ms per handle_batch call (simulates DB write latency)
+write_delay_ms       = 0         # ms per user-group write (simulates DB write latency)
 # ---------------
 
-metric     = Metrics.sum("bench.pull.throughput")
-store_name = :bench_pull_debug
+metric     = Metrics.sum("bench.pull.ingest.throughput")
+store_name = :bench_pull_ingest_debug
 
-# Counters stored in persistent_term so Broadway callbacks can reach them
-# without needing to thread state through Broadway's API.
 dp_counter    = :atomics.new(1, signed: false)
 cycle_counter = :atomics.new(1, signed: false)
 peak_memory   = :atomics.new(1, signed: false)
 unique_tag    = :atomics.new(1, signed: false)
 stop_flag     = :atomics.new(1, signed: false)
 
-:persistent_term.put(:pull_debug_counters, %{
+:persistent_term.put(:pull_ingest_debug_counters, %{
   dp_counter:    dp_counter,
   cycle_counter: cycle_counter,
   write_delay_ms: write_delay_ms
 })
 
-defmodule PullDebugPipeline do
+defmodule PullIngestDebugPipeline do
   use Broadway
 
   alias OtelMetricExporter.PullProducer
@@ -88,19 +91,30 @@ defmodule PullDebugPipeline do
   @impl true
   def handle_batch(:default, messages, _batch_info, _context) do
     %{dp_counter: dp, cycle_counter: cc, write_delay_ms: delay} =
-      :persistent_term.get(:pull_debug_counters)
+      :persistent_term.get(:pull_ingest_debug_counters)
+
+    # Mirror IngestPipeline: group by user_id, write once per user group.
+    # cycle_counter tracks handle_batch calls; delay applies per user group.
+    grouped =
+      messages
+      |> Enum.map(& &1.data)
+      |> Enum.group_by(fn event -> event["attributes"]["user_id"] end)
 
     :atomics.add(dp, 1, length(messages))
     :atomics.add(cc, 1, 1)
-    if delay > 0, do: Process.sleep(delay)
+
+    if delay > 0 do
+      Enum.each(grouped, fn _ -> Process.sleep(delay) end)
+    end
+
     messages
   end
 end
 
 IO.puts("")
-IO.puts("=== pull_debug (Broadway) ===")
+IO.puts("=== pull_ingest_debug (Broadway + bounded cardinality) ===")
 IO.puts("Writers: #{num_writers}, Duration: #{run_duration_ms}ms, write_batch: #{write_batch}")
-IO.puts("pull_interval: #{pull_interval_ms}ms")
+IO.puts("num_users: #{num_users}, pull_interval: #{pull_interval_ms}ms")
 IO.puts("batch_size: #{batch_size}, batch_timeout: #{batch_timeout_ms}ms")
 IO.puts("processor_concurrency: #{processor_concurrency}, batcher_concurrency: #{batcher_concurrency}")
 IO.puts("write_delay_ms: #{write_delay_ms}")
@@ -108,14 +122,14 @@ IO.puts("")
 
 {:ok, store_pid} =
   MetricStore.start_link(%{
-    export_period: 1000,
+    export_period: 60_000,
     metrics: [metric],
     name: store_name,
     pull_mode: true
   })
 
 {:ok, _pipeline_pid} =
-  PullDebugPipeline.start_link(
+  PullIngestDebugPipeline.start_link(
     store_name: store_name,
     pull_interval: pull_interval_ms,
     batch_size: batch_size,
@@ -125,13 +139,14 @@ IO.puts("")
   )
 
 writers =
-  for w <- 1..num_writers do
+  for _w <- 1..num_writers do
     Task.async(fn ->
       loop = fn loop ->
         if :atomics.get(stop_flag, 1) == 0 do
           for _ <- 1..write_batch do
             slot = :atomics.add_get(unique_tag, 1, 1)
-            MetricStore.write_metric(store_name, metric, 1, %{writer: w, slot: slot})
+            user_id = rem(slot, num_users)
+            MetricStore.write_metric(store_name, metric, 1, %{"user_id" => user_id})
           end
           loop.(loop)
         end
@@ -174,10 +189,9 @@ sampler =
         new_emitted = emitted - :atomics.get(prev_emitted, 1)
         :atomics.put(prev_emitted, 1, emitted)
 
-        # Broadway wraps PullProducer — inspect its state via Broadway's API
         {demand, has_collector} =
           try do
-            [prod | _] = Broadway.producer_names(PullDebugPipeline)
+            [prod | _] = Broadway.producer_names(PullIngestDebugPipeline)
             s = :sys.get_state(Process.whereis(prod)).state.module_state
             {s.pending_demand, s.collector != nil}
           rescue
@@ -250,9 +264,9 @@ dp_per_s       = Float.round(total_dp / elapsed_s, 1)
 avg_per_cycle  = if cycles > 0, do: Float.round(total_dp / cycles, 1), else: 0.0
 unique_written = :atomics.get(unique_tag, 1)
 
-Supervisor.stop(PullDebugPipeline)
+Supervisor.stop(PullIngestDebugPipeline)
 if Process.alive?(store_pid), do: GenServer.stop(store_pid, :shutdown, 2_000)
-:persistent_term.erase(:pull_debug_counters)
+:persistent_term.erase(:pull_ingest_debug_counters)
 
 IO.puts("")
 IO.puts("=== Result ===")
@@ -262,5 +276,5 @@ IO.puts("  Batch cycles      : #{cycles}")
 IO.puts("  DP / batch (avg)  : #{avg_per_cycle}")
 IO.puts("  Throughput        : #{dp_per_s} dp/sec")
 IO.puts("  Peak ETS memory   : #{peak_kb} KB")
-IO.puts("  Writes - emitted  : #{unique_written - total_dp} (lag at stop)")
+IO.puts("  Writes - emitted  : #{unique_written - total_dp} (agg lag — expected with bounded cardinality)")
 IO.puts("")

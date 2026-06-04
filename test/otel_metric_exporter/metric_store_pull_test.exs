@@ -17,6 +17,15 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     {:ok, store_config: config}
   end
 
+  # Trigger a rotation so prepare_to_collect has a sealed generation to drain.
+  # In production this happens via rotate_and_trim; tests use this helper.
+  defp rotate(name) do
+    send(name, :rotate_and_trim)
+    # Synchronise: a call to any GenServer function ensures the message was processed
+    MetricStore.record_count(name)
+    :ok
+  end
+
   describe "prepare_to_collect — resumable collector closure" do
     setup %{store_config: config} do
       metric = Metrics.sum("pull.test.sum")
@@ -25,6 +34,7 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     end
 
     test "collector returns :done immediately when store is empty" do
+      rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
       assert {:ok, [], :done} = collector.(100)
     end
@@ -32,7 +42,7 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     test "collector returns one flat map per ETS row with :infinity limit" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 5, %{id: "a"})
-
+      rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
       assert {:ok, [event], :done} = collector.(:infinity)
 
@@ -52,7 +62,7 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       MetricStore.write_metric(@name, metric, 1, %{id: "a"})
       MetricStore.write_metric(@name, metric, 2, %{id: "b"})
       MetricStore.write_metric(@name, metric, 3, %{id: "c"})
-
+      rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
 
       # limit 1 — one row (one flat map) comes back, two remain
@@ -70,11 +80,12 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     test "after :done, next prepare_to_collect starts a fresh generation" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 10, %{id: "x"})
-
+      rotate(@name)
       {:ok, c1} = MetricStore.prepare_to_collect(@name)
       assert {:ok, _, :done} = c1.(:infinity)
 
-      # Nothing new written — next collector finds an empty generation
+      # Nothing new written — next rotation finds an empty generation
+      rotate(@name)
       {:ok, c2} = MetricStore.prepare_to_collect(@name)
       assert {:ok, [], :done} = c2.(:infinity)
     end
@@ -83,8 +94,7 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 1, %{id: "a"})
       MetricStore.write_metric(@name, metric, 2, %{id: "b"})
-
-      # Acquire seals gen 0; writes now go to gen 1
+      rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
 
       MetricStore.write_metric(@name, metric, 99, %{id: "new"})
@@ -96,7 +106,8 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       assert {:ok, batch2, :done} = c2.(1)
       assert length(batch2) == 1
 
-      # Next cycle picks up the "new" write from gen 1
+      # Rotate to seal gen 1, then collect the "new" write
+      rotate(@name)
       {:ok, c3} = MetricStore.prepare_to_collect(@name)
       assert {:ok, [event3], :done} = c3.(:infinity)
 
@@ -106,13 +117,13 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     test "full lifecycle across two generations" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 10, %{id: "g0"})
-
+      rotate(@name)
       {:ok, c0} = MetricStore.prepare_to_collect(@name)
       assert {:ok, [e0], :done} = c0.(:infinity)
       assert e0["value"] == 10
 
       MetricStore.write_metric(@name, metric, 20, %{id: "g1"})
-
+      rotate(@name)
       {:ok, c1} = MetricStore.prepare_to_collect(@name)
       assert {:ok, [e1], :done} = c1.(:infinity)
       assert e1["value"] == 20

@@ -64,7 +64,7 @@ defmodule OtelMetricExporter.PullProducerTest do
     metric = Metrics.sum("producer.test.sum")
 
     store_config = %{
-      export_period: 5000,
+      export_period: 50,
       metrics: [metric],
       name: @store_name,
       pull_mode: true

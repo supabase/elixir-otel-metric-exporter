@@ -89,7 +89,7 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   def pull(name) do
-    with {:ok, collector} <- prepare_to_collect(name) do
+    with {:ok, collector} <- GenServer.call(name, :force_rotate_and_collect) do
       {:ok, metrics, :done} = collector.(:infinity)
       {:ok, metrics}
     end
@@ -206,20 +206,40 @@ defmodule OtelMetricExporter.MetricStore do
     end
   end
 
+  # One-shot drain: rotates the current generation if needed then collects.
+  # Used by pull/1 (testing, manual drain). Not for the streaming pipeline.
   @impl true
-  def handle_call(:prepare_to_collect, _from, state) do
-    earliest_gen = bump_earliest_gen(state.metrics_table)
-    current_gen = get_current_gen(state.metrics_table)
-    if current_gen == earliest_gen, do: rotate_generation(state)
+  def handle_call(:force_rotate_and_collect, _from, state) do
+    current_gen     = get_current_gen(state.metrics_table)
+    next_to_collect = peek_earliest_gen(state.metrics_table)
+    if current_gen == next_to_collect, do: rotate_generation(state)
 
-    gen_meta = pop_generation(state, earliest_gen)
-    collector = make_collector(gen_meta, state.metrics_table)
+    earliest_gen = bump_earliest_gen(state.metrics_table)
+    gen_meta     = pop_generation(state, earliest_gen)
+    collector    = make_collector(gen_meta, state.metrics_table)
     {:reply, {:ok, collector}, state}
   end
 
   @impl true
+  def handle_call(:prepare_to_collect, _from, state) do
+    current_gen  = get_current_gen(state.metrics_table)
+    next_to_collect = peek_earliest_gen(state.metrics_table)
+
+    if current_gen == next_to_collect do
+      # No sealed generation available yet — rotate_and_trim has not fired.
+      # Return an empty collector so the producer backs off until export_period elapses.
+      {:reply, {:ok, nil }, state}
+    else
+      # Claim the next sealed generation and return a collector for it.
+      earliest_gen = bump_earliest_gen(state.metrics_table)
+      gen_meta     = pop_generation(state, earliest_gen)
+      collector    = make_collector(gen_meta, state.metrics_table)
+      {:reply, {:ok, collector}, state}
+    end
+  end
+
+  @impl true
   def handle_info(:rotate_and_trim, state) do
-    dbg("Rotate and trim")
     rotate_generation(state)
     Process.send_after(self(), :rotate_and_trim, state.config.export_period)
     {:noreply, state}
@@ -395,17 +415,9 @@ defmodule OtelMetricExporter.MetricStore do
 
     case type do
       :counter ->
-        Map.merge(base, %{
-          "aggregation_temporality" => @sum_temporality,
-          "is_monotonic" => true
-        })
-
+        Map.merge(base, %{"aggregation_temporality" => @sum_temporality, "is_monotonic" => true})
       :sum ->
-        Map.merge(base, %{
-          "aggregation_temporality" => @sum_temporality,
-          "is_monotonic" => false
-        })
-
+        Map.merge(base, %{"aggregation_temporality" => @sum_temporality, "is_monotonic" => false})
       _ ->
         base
     end
@@ -550,6 +562,13 @@ defmodule OtelMetricExporter.MetricStore do
     next_gen = :atomics.add_get(counters, @current_gen_idx, 1)
     old_gen = if next_gen != 0, do: next_gen - 1, else: @max_counter_value
     {old_gen, next_gen}
+  end
+
+  # Read without incrementing — safe because prepare_to_collect is a GenServer call
+  # and earliest_gen is only modified from within this GenServer.
+  defp peek_earliest_gen(table) do
+    counters = :persistent_term.get(generation_key(table))
+    :atomics.get(counters, @earliest_gen_idx)
   end
 
   defp bump_earliest_gen(table) do

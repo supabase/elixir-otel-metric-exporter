@@ -81,7 +81,8 @@ sampler =
              String.pad_leading("total_gens", 11) <>
              String.pad_leading("net_del", 10) <>
              String.pad_leading("emitted", 10) <>
-             String.pad_leading("mem_kb", 10)
+             String.pad_leading("ets_kb", 8) <>
+             String.pad_leading("proc_kb", 9)
 
     IO.puts(header)
     IO.puts(String.duplicate("-", String.length(header)))
@@ -108,13 +109,16 @@ sampler =
             _ -> ?-
           end
 
+        proc_kb = Float.round(:erlang.memory(:processes) / 1024, 0)
+
         IO.puts(
           String.pad_trailing("#{tick * 50}", 8) <>
           String.pad_leading("#{rows}", 10) <>
           String.pad_leading("#{total_gens}", 11) <>
           String.pad_leading("#{net_del}", 10) <>
           String.pad_leading("#{new_emitted}", 10) <>
-          String.pad_leading("#{Float.round(mem / 1024, 0)}", 10)
+          String.pad_leading("#{Float.round(mem / 1024, 0)}", 8) <>
+          String.pad_leading("#{proc_kb}", 9)
         )
 
         Process.sleep(50)
