@@ -43,6 +43,7 @@ defmodule OtelMetricExporter.MixProject do
       {:finch, "~> 0.19"},
       {:retry, "~> 0.19"},
       {:gen_stage, "~> 1.2"},
+      {:broadway, "~> 1.0", only: [:dev, :test]},
       {:bypass, "~> 2.1", only: [:test]},
       {:opentelemetry, "~> 1.5", only: [:test]},
       {:mix_test_watch, "~> 1.0", only: [:dev, :test], runtime: false},

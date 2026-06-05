@@ -46,10 +46,8 @@ defmodule RealisticConsumer do
 
   @impl true
   def handle_events(events, _from, state) do
-    dp_count =
-      Enum.reduce(events, 0, fn %{data: {_kind, %{data_points: dps}}}, acc ->
-        acc + length(dps)
-      end)
+    # Each event is now a flat map (one per ETS row = one data point)
+    dp_count = length(events)
 
     :atomics.add(state.dp_counter, 1, dp_count)
     :atomics.add(state.cycle_counter, 1, 1)
@@ -106,19 +104,38 @@ run_scenario = fn label, setup_fn ->
 
   sampler =
     Task.async(fn ->
-      loop = fn loop ->
-        if :atomics.get(stop_flag, 1) == 0 do
-          mem =
-            :ets.info(Keyword.fetch!(pids, :store_name), :memory) *
-              :erlang.system_info(:wordsize)
+      table = Keyword.fetch!(pids, :store_name)
+      prev_rows = :atomics.new(1, signed: false)
 
+      loop = fn loop, tick ->
+        if :atomics.get(stop_flag, 1) == 0 do
+          mem = :ets.info(table, :memory) * :erlang.system_info(:wordsize)
           if mem > :atomics.get(peak_memory, 1), do: :atomics.put(peak_memory, 1, mem)
+
+          # Every 250ms print a snapshot so we can see generation build-up
+          if rem(tick, 10) == 0 do
+            rows = :ets.info(table, :size)
+            deleted = max(:atomics.get(prev_rows, 1) - rows, 0)
+            :atomics.put(prev_rows, 1, rows)
+
+            gen_counts =
+              :ets.match(table, {{:"$1", :_, :_, :_, :_}, :_, :_})
+              |> Enum.frequencies_by(&hd/1)
+
+            num_gens = map_size(gen_counts)
+            max_gen_rows = gen_counts |> Map.values() |> Enum.max(fn -> 0 end)
+
+            IO.puts("  [t=#{tick * 25}ms] rows=#{rows} gens=#{num_gens} " <>
+                    "max_rows_per_gen=#{max_gen_rows} deleted_since_last=#{deleted} " <>
+                    "mem=#{Float.round(mem / 1024, 0)}KB")
+          end
+
           Process.sleep(25)
-          loop.(loop)
+          loop.(loop, tick + 1)
         end
       end
 
-      loop.(loop)
+      loop.(loop, 0)
     end)
 
   t0 = System.monotonic_time(:millisecond)

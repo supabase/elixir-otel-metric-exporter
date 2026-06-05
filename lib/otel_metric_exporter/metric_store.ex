@@ -89,9 +89,17 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   def pull(name) do
-    with {:ok, collector} <- prepare_to_collect(name) do
-      {:ok, metrics, :done} = collector.(:infinity)
-      {:ok, metrics}
+    # Queue a rotation before collecting. Since GenServer processes messages in
+    # order, the rotation completes before prepare_to_collect is handled.
+    send(name, :rotate_and_trim)
+
+    case prepare_to_collect(name) do
+      {:ok, nil} ->
+        {:ok, []}
+
+      {:ok, collector} ->
+        {:ok, metrics, :done} = collector.(:infinity)
+        {:ok, metrics}
     end
   end
 
@@ -103,6 +111,16 @@ defmodule OtelMetricExporter.MetricStore do
   `{:more, next_collector}` until `:done`. ETS cleanup is handled inside the closure.
   """
   def prepare_to_collect(name), do: GenServer.call(name, :prepare_to_collect)
+
+  @doc """
+  Returns true if a sealed generation is waiting to be drained.
+  Uses atomic reads only — no GenServer call — so the MetricStore process
+  is not woken up. Safe to call at high frequency from PullProducer.
+  """
+  @spec generation_available?(atom()) :: boolean()
+  def generation_available?(metrics_table) do
+    get_current_gen(metrics_table) != peek_earliest_gen(metrics_table)
+  end
 
   @spec record_count(atom()) :: non_neg_integer()
   def record_count(name), do: :ets.info(name, :size)
@@ -175,6 +193,19 @@ defmodule OtelMetricExporter.MetricStore do
     timer_message = if config[:pull_mode] == true, do: :rotate_and_trim, else: :export
     Process.send_after(self(), timer_message, config.export_period)
 
+    if config[:pull_mode] == true do
+      dist_names =
+        metrics
+        |> Enum.filter(&match?(%Metrics.Distribution{}, &1))
+        |> Enum.map(&Enum.join(&1.name, "."))
+
+      if dist_names != [] do
+        Logger.warning(
+          "Pull mode does not support distribution metrics, they will be dropped: #{inspect(dist_names)}"
+        )
+      end
+    end
+
     # Create ETS table for metrics
     :ets.new(metrics_table, [:ordered_set, :public, :named_table, {:write_concurrency, :auto}])
 
@@ -208,13 +239,29 @@ defmodule OtelMetricExporter.MetricStore do
 
   @impl true
   def handle_call(:prepare_to_collect, _from, state) do
-    earliest_gen = bump_earliest_gen(state.metrics_table)
     current_gen = get_current_gen(state.metrics_table)
-    if current_gen == earliest_gen, do: rotate_generation(state)
+    next_to_collect = peek_earliest_gen(state.metrics_table)
 
-    gen_meta = pop_generation(state, earliest_gen)
-    collector = make_collector(gen_meta, state.metrics_table, state.metrics)
-    {:reply, {:ok, collector}, state}
+    if current_gen == next_to_collect do
+      # No sealed generation available yet — rotate_and_trim has not fired.
+      # Return an empty collector so the producer backs off until export_period elapses.
+      {:reply, {:ok, nil}, state}
+    else
+      # Claim the next sealed generation and return a collector for it.
+      # Use lookup (not pop) so the entry stays in generations_table until
+      # the collector is fully drained — allowing trim_metrics_table to find
+      # and clean up rows if the collector is abandoned under memory pressure.
+      earliest_gen = bump_earliest_gen(state.metrics_table)
+      gen_meta = lookup_generation(state, earliest_gen)
+      collector = make_collector(gen_meta, state.metrics_table, state.config.name)
+      {:reply, {:ok, collector}, state}
+    end
+  end
+
+  @impl true
+  def handle_cast({:release_generation, gen}, state) do
+    :ets.delete(state.generations_table, gen)
+    {:noreply, state}
   end
 
   @impl true
@@ -274,7 +321,9 @@ defmodule OtelMetricExporter.MetricStore do
   defp export_metrics(%State{} = state) do
     current_gen = rotate_generation(state)
     earliest_gen = earliest_gen(state.generations_table)
-    metrics = collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state.metrics)
+
+    metrics =
+      collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state.metrics)
 
     case OtelApi.send_metrics(state.api, metrics) do
       :ok ->
@@ -303,14 +352,6 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
-  defp collect_metrics_bounded(rows, {_, start, finish}) do
-    group_rows(rows)
-    |> Enum.map(fn {key, values} ->
-      tagged_values = Enum.map(values, fn {tags, value} -> {{start, finish}, tags, value} end)
-      {key, tagged_values}
-    end)
-  end
-
   defp transform_metrics(raw_metrics, metrics) when is_list(metrics) do
     raw_metrics
     |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
@@ -322,12 +363,9 @@ defmodule OtelMetricExporter.MetricStore do
     end)
   end
 
+  defp make_collector({nil, nil, nil}, _table, _store), do: nil
 
-  defp make_collector({nil, nil, nil}, _table, _metrics_config) do
-    fn _limit -> {:ok, [], :done} end
-  end
-
-  defp make_collector({gen, _, _} = gen_meta, table, metrics_config) do
+  defp make_collector({gen, _, _} = gen_meta, table, store) do
     fn limit ->
       pattern = {{gen, :_, :_, :_, :_}, :_, :_}
 
@@ -353,17 +391,75 @@ defmodule OtelMetricExporter.MetricStore do
         :ets.match_delete(table, pattern)
       end
 
-      metrics =
-        collect_metrics_bounded(objects, gen_meta)
-        |> transform_metrics(metrics_config)
+      events = rows_to_events(objects, gen_meta)
 
       if has_more do
-        {:ok, metrics, {:more, make_collector(gen_meta, table, metrics_config)}}
+        {:ok, events, {:more, make_collector(gen_meta, table, store)}}
       else
-        {:ok, metrics, :done}
+        # All rows drained — release the generations_table entry via cast so
+        # trim_metrics_table can no longer see it and the gen is fully cleaned up.
+        GenServer.cast(store, {:release_generation, gen})
+        {:ok, events, :done}
       end
     end
   end
+
+  # Converts a batch of raw ETS rows to ingestion events.
+  # Distribution metrics are not supported in pull mode — the collector does not
+  # have access to the bucket bounds (stored in Metrics.Distribution reporter_options,
+  # not in ETS) needed to reconstruct a well-formed histogram event.
+  defp rows_to_events(rows, gen_meta) do
+    rows
+    |> Enum.map(&row_to_event(&1, gen_meta))
+    |> Enum.reject(&is_nil(&1))
+  end
+
+  # Convert atom tag values to strings. Tags arriving from UserMonitoring telemetry
+  # already have binary keys and no nested maps (enforced by extract_tags/2), so only
+  # atom values need normalizing — e.g. a source_token stored as an atom becomes a
+  # string, matching what the old build_kv → protobuf → Otel.handle_attributes path produced.
+  defp normalize_tags(tags) when is_map(tags) do
+    Map.new(tags, fn
+      {k, v} when is_atom(v) -> {k, Atom.to_string(v)}
+      {k, v} -> {k, v}
+    end)
+  end
+
+  # metric_type strings must match what OtelMetric.handle_metric produced via the
+  # old protobuf path so downstream BigQuery schemas stay consistent:
+  #   :distribution → "histogram"  (was {:histogram, ...})
+  #   :last_value   → "gauge"      (was {:gauge, ...})
+  #   :counter/:sum → "sum"        (both became {:sum, ...})
+  defp row_to_event({{_gen, name, :last_value, tags, _}, value, _}, {_, start, finish}) do
+    %{
+      "event_message" => name,
+      "metric_type" => "gauge",
+      "metadata" => %{"type" => "metric"},
+      "value" => value,
+      "attributes" => normalize_tags(tags),
+      "start_time" => start,
+      "timestamp" => finish
+    }
+  end
+
+  @sum_temporality "cumulative"
+
+  defp row_to_event({{_gen, name, type, tags, _}, value, _}, {_, start, finish})
+       when type in [:counter, :sum] do
+    %{
+      "event_message" => name,
+      "metric_type" => "sum",
+      "metadata" => %{"type" => "metric"},
+      "aggregation_temporality" => @sum_temporality,
+      "is_monotonic" => type == :counter,
+      "value" => value,
+      "attributes" => normalize_tags(tags),
+      "start_time" => start,
+      "timestamp" => finish
+    }
+  end
+
+  defp row_to_event({{_gen, _name, _type, _tags, _}, _value, _}, {_, _start, _finish}), do: nil
 
   defp convert_metric(
          %{name: name, description: description, unit: unit} = metric,
@@ -504,6 +600,13 @@ defmodule OtelMetricExporter.MetricStore do
     next_gen = :atomics.add_get(counters, @current_gen_idx, 1)
     old_gen = if next_gen != 0, do: next_gen - 1, else: @max_counter_value
     {old_gen, next_gen}
+  end
+
+  # Read without incrementing — safe because prepare_to_collect is a GenServer call
+  # and earliest_gen is only modified from within this GenServer.
+  defp peek_earliest_gen(table) do
+    counters = :persistent_term.get(generation_key(table))
+    :atomics.get(counters, @earliest_gen_idx)
   end
 
   defp bump_earliest_gen(table) do

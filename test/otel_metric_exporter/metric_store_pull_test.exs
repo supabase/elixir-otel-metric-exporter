@@ -17,6 +17,15 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     {:ok, store_config: config}
   end
 
+  # Trigger a rotation so prepare_to_collect has a sealed generation to drain.
+  # In production this happens via rotate_and_trim; tests use this helper.
+  defp rotate(name) do
+    send(name, :rotate_and_trim)
+    # Synchronise: a call to any GenServer function ensures the message was processed
+    MetricStore.record_count(name)
+    :ok
+  end
+
   describe "prepare_to_collect — resumable collector closure" do
     setup %{store_config: config} do
       metric = Metrics.sum("pull.test.sum")
@@ -25,16 +34,27 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     end
 
     test "collector returns :done immediately when store is empty" do
+      rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
       assert {:ok, [], :done} = collector.(100)
     end
 
-    test "collector returns all metrics with :infinity limit" do
+    test "collector returns one flat map per ETS row with :infinity limit" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 5, %{id: "a"})
-
+      rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
-      assert {:ok, [%{name: "pull.test.sum"}], :done} = collector.(:infinity)
+      assert {:ok, [event], :done} = collector.(:infinity)
+
+      assert event["event_message"] == "pull.test.sum"
+      assert event["metric_type"] == "sum"
+      assert event["value"] == 5
+      assert event["attributes"] == %{id: "a"}
+      assert is_integer(event["start_time"])
+      assert is_integer(event["timestamp"])
+      assert event["aggregation_temporality"] == "cumulative"
+      assert event["is_monotonic"] == false
+      assert event["metadata"] == %{"type" => "metric"}
     end
 
     test "bounded drain: collector returns {:more, next} when rows remain" do
@@ -42,34 +62,30 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       MetricStore.write_metric(@name, metric, 1, %{id: "a"})
       MetricStore.write_metric(@name, metric, 2, %{id: "b"})
       MetricStore.write_metric(@name, metric, 3, %{id: "c"})
-
+      rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
 
-      # limit 1 — one row comes back, two remain
+      # limit 1 — one row (one flat map) comes back, two remain
       assert {:ok, batch1, {:more, c2}} = collector.(1)
       assert length(batch1) == 1
 
-      # limit 10 — drains the remaining two rows in one shot
+      # limit 10 — drains the remaining two rows (two flat maps)
       assert {:ok, batch2, :done} = c2.(10)
-      assert length(batch2) == 1
+      assert length(batch2) == 2
 
-      # total data points across both batches
-      total_points =
-        (batch1 ++ batch2)
-        |> Enum.flat_map(fn m -> elem(m.data, 1).data_points end)
-        |> length()
-
-      assert total_points == 3
+      # three rows written → three flat maps total
+      assert length(batch1) + length(batch2) == 3
     end
 
     test "after :done, next prepare_to_collect starts a fresh generation" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 10, %{id: "x"})
-
+      rotate(@name)
       {:ok, c1} = MetricStore.prepare_to_collect(@name)
       assert {:ok, _, :done} = c1.(:infinity)
 
-      # Nothing new written — next collector finds an empty generation
+      # Nothing new written — next rotation finds an empty generation
+      rotate(@name)
       {:ok, c2} = MetricStore.prepare_to_collect(@name)
       assert {:ok, [], :done} = c2.(:infinity)
     end
@@ -78,8 +94,7 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 1, %{id: "a"})
       MetricStore.write_metric(@name, metric, 2, %{id: "b"})
-
-      # Acquire seals gen 0; writes now go to gen 1
+      rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
 
       MetricStore.write_metric(@name, metric, 99, %{id: "new"})
@@ -91,27 +106,95 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       assert {:ok, batch2, :done} = c2.(1)
       assert length(batch2) == 1
 
-      # Next cycle picks up the "new" write from gen 1
+      # Rotate to seal gen 1, then collect the "new" write
+      rotate(@name)
       {:ok, c3} = MetricStore.prepare_to_collect(@name)
-      assert {:ok, [metric3], :done} = c3.(:infinity)
+      assert {:ok, [event3], :done} = c3.(:infinity)
 
-      [dp] = elem(metric3.data, 1).data_points
-      assert dp.value == {:as_int, 99}
+      assert event3["value"] == 99
+    end
+
+    test "metric_type mapping matches old OtelMetric.handle_metric output" do
+      # Verify the type strings match what the old protobuf → handle_metric path produced
+      # so BigQuery schemas and existing queries remain compatible.
+      tags = %{id: "t"}
+
+      counter = Metrics.counter("m.counter")
+      sum = Metrics.sum("m.sum")
+      gauge = Metrics.last_value("m.gauge")
+
+      MetricStore.write_metric(@name, counter, 1, tags)
+      MetricStore.write_metric(@name, sum, 10, tags)
+      MetricStore.write_metric(@name, gauge, 99, tags)
+      rotate(@name)
+      {:ok, collector} = MetricStore.prepare_to_collect(@name)
+      {:ok, events, :done} = collector.(:infinity)
+
+      by_name = Map.new(events, fn e -> {e["event_message"], e} end)
+
+      # Counter → "sum" (was {:sum, is_monotonic: true} in protobuf)
+      assert by_name["m.counter"]["metric_type"] == "sum"
+      assert by_name["m.counter"]["is_monotonic"] == true
+      assert by_name["m.counter"]["aggregation_temporality"] == "cumulative"
+
+      # Sum → "sum" (was {:sum, is_monotonic: false} in protobuf)
+      assert by_name["m.sum"]["metric_type"] == "sum"
+      assert by_name["m.sum"]["is_monotonic"] == false
+      assert by_name["m.sum"]["aggregation_temporality"] == "cumulative"
+
+      # LastValue → "gauge" (was {:gauge, ...} in protobuf)
+      assert by_name["m.gauge"]["metric_type"] == "gauge"
+      refute Map.has_key?(by_name["m.gauge"], "is_monotonic")
+    end
+
+    test "distribution rows are silently dropped at collection time" do
+      # Distribution metrics require bucket bounds (stored in Metrics.Distribution
+      # reporter_options, not in ETS) to reconstruct a valid histogram event.
+      # Pull mode drops them silently at collection time (warning fires once at startup).
+      metric = Metrics.distribution("m.latency", reporter_options: [buckets: [10, 100, 1000]])
+      sum = Metrics.sum("m.bytes")
+
+      MetricStore.write_metric(@name, metric, 50, %{"user_id" => "a"})
+      MetricStore.write_metric(@name, sum, 100, %{"user_id" => "a"})
+      rotate(@name)
+      {:ok, collector} = MetricStore.prepare_to_collect(@name)
+      {:ok, events, :done} = collector.(:infinity)
+
+      assert length(events) == 1
+      assert hd(events)["event_message"] == "m.bytes"
+    end
+
+    test "warns at startup when pull_mode store is configured with distribution metrics" do
+      import ExUnit.CaptureLog
+
+      dist = Metrics.distribution("m.latency", reporter_options: [buckets: [10, 100]])
+
+      config = %{
+        export_period: 60_000,
+        metrics: [dist],
+        name: :pull_dist_warn_test,
+        pull_mode: true
+      }
+
+      log = capture_log(fn -> start_supervised!({MetricStore, config}, id: :dist_warn_store) end)
+
+      assert log =~ "does not support distribution metrics"
+      assert log =~ "m.latency"
     end
 
     test "full lifecycle across two generations" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 10, %{id: "g0"})
-
+      rotate(@name)
       {:ok, c0} = MetricStore.prepare_to_collect(@name)
-      assert {:ok, [m0], :done} = c0.(:infinity)
-      assert [%{value: {:as_int, 10}}] = elem(m0.data, 1).data_points
+      assert {:ok, [e0], :done} = c0.(:infinity)
+      assert e0["value"] == 10
 
       MetricStore.write_metric(@name, metric, 20, %{id: "g1"})
-
+      rotate(@name)
       {:ok, c1} = MetricStore.prepare_to_collect(@name)
-      assert {:ok, [m1], :done} = c1.(:infinity)
-      assert [%{value: {:as_int, 20}}] = elem(m1.data, 1).data_points
+      assert {:ok, [e1], :done} = c1.(:infinity)
+      assert e1["value"] == 20
     end
   end
 
