@@ -183,6 +183,19 @@ defmodule OtelMetricExporter.MetricStore do
     timer_message = if config[:pull_mode] == true, do: :rotate_and_trim, else: :export
     Process.send_after(self(), timer_message, config.export_period)
 
+    if config[:pull_mode] == true do
+      dist_names =
+        metrics
+        |> Enum.filter(&match?(%Metrics.Distribution{}, &1))
+        |> Enum.map(&Enum.join(&1.name, "."))
+
+      if dist_names != [] do
+        Logger.warning(
+          "Pull mode does not support distribution metrics, they will be dropped: #{inspect(dist_names)}"
+        )
+      end
+    end
+
     # Create ETS table for metrics
     :ets.new(metrics_table, [:ordered_set, :public, :named_table, {:write_concurrency, :auto}])
 
@@ -386,21 +399,18 @@ defmodule OtelMetricExporter.MetricStore do
   # have access to the bucket bounds (stored in Metrics.Distribution reporter_options,
   # not in ETS) needed to reconstruct a well-formed histogram event.
   defp rows_to_events(rows, gen_meta) do
-    {dist_rows, simple_rows} =
-      Enum.split_with(rows, fn
-        {{_, _, :distribution, _, _}, _, _} -> true
-        _ -> false
-      end)
-
-    if dist_rows != [] do
-      Logger.warning("Pull mode does not support distribution metrics — dropping rows")
-    end
-
-    Enum.map(simple_rows, &row_to_event(&1, gen_meta))
+    rows
+    |> Enum.reject(fn
+      {{_, _, :distribution, _, _}, _, _} -> true
+      _ -> false
+    end)
+    |> Enum.map(&row_to_event(&1, gen_meta))
   end
 
-  # Normalize tag values: the old protobuf path converted atoms to strings via encoding;
-  # we replicate that here so downstream consumers see the same attribute types.
+  # Convert atom tag values to strings. Tags arriving from UserMonitoring telemetry
+  # already have binary keys and no nested maps (enforced by extract_tags/2), so only
+  # atom values need normalizing — e.g. a source_token stored as an atom becomes a
+  # string, matching what the old build_kv → protobuf → Otel.handle_attributes path produced.
   defp normalize_tags(tags) when is_map(tags) do
     Map.new(tags, fn
       {k, v} when is_atom(v) -> {k, Atom.to_string(v)}

@@ -73,15 +73,15 @@ defmodule OtelMetricExporter.PullProducer do
     do_collect(state, collector)
   end
 
-  defp do_collect(state, collector, out \\ [])
+  defp do_collect(state, collector, acc \\ [])
 
-  defp do_collect(%{pending_demand: demand} = state, nil, out) when demand > 0 do
-    {:noreply, out, schedule_tick(state)}
+  defp do_collect(%{pending_demand: demand} = state, nil, acc) when demand > 0 do
+    {:noreply, flatten_acc(acc), schedule_tick(state)}
   end
 
-  defp do_collect(state, nil, out), do: {:noreply, out, state}
+  defp do_collect(state, nil, acc), do: {:noreply, flatten_acc(acc), state}
 
-  defp do_collect(state, collector, out) do
+  defp do_collect(state, collector, acc) do
     case collector.(state.pending_demand) do
       {:ok, events, done_or_more} ->
         state =
@@ -100,14 +100,22 @@ defmodule OtelMetricExporter.PullProducer do
         # the stored collector will be used when demand arrives via handle_demand.
         case state do
           %{pending_demand: d, collector: nil} when d > 0 ->
-            {:ok, collector} = MetricStore.prepare_to_collect(state.metric_store_name)
-            do_collect(state, collector, out ++ events)
+            {:ok, next_collector} = MetricStore.prepare_to_collect(state.metric_store_name)
+            do_collect(state, next_collector, [events | acc])
 
           state ->
-            {:noreply, out ++ events, state}
+            {:noreply, flatten_acc([events | acc]), state}
         end
     end
   end
+
+  # Flatten the accumulated list of event batches into a single list.
+  # The single-batch case (overwhelmingly common) returns the list directly — O(1).
+  # Multiple batches (rare: only when several generations drain in one demand cycle)
+  # reverse then concat — O(k) on batch count + O(n) on total events.
+  defp flatten_acc([]),       do: []
+  defp flatten_acc([single]), do: single
+  defp flatten_acc(acc),      do: acc |> Enum.reverse() |> Enum.concat()
 
   defp emit_telemetry(emitted, metric_store_name) do
     :telemetry.execute(

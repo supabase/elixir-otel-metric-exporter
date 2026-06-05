@@ -147,10 +147,10 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       refute Map.has_key?(by_name["m.gauge"], "is_monotonic")
     end
 
-    test "distribution rows are dropped with a warning in pull mode" do
+    test "distribution rows are silently dropped at collection time" do
       # Distribution metrics require bucket bounds (stored in Metrics.Distribution
       # reporter_options, not in ETS) to reconstruct a valid histogram event.
-      # Pull mode drops them rather than emitting broken partial data.
+      # Pull mode drops them silently at collection time (warning fires once at startup).
       metric = Metrics.distribution("m.latency", reporter_options: [buckets: [10, 100, 1000]])
       sum    = Metrics.sum("m.bytes")
 
@@ -158,16 +158,27 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       MetricStore.write_metric(@name, sum, 100, %{"user_id" => "a"})
       rotate(@name)
       {:ok, collector} = MetricStore.prepare_to_collect(@name)
-
-      import ExUnit.CaptureLog
-      {events, log} = with_log(fn ->
-        {:ok, evts, :done} = collector.(:infinity)
-        evts
-      end)
+      {:ok, events, :done} = collector.(:infinity)
 
       assert length(events) == 1
       assert hd(events)["event_message"] == "m.bytes"
+    end
+
+    test "warns at startup when pull_mode store is configured with distribution metrics" do
+      import ExUnit.CaptureLog
+
+      dist   = Metrics.distribution("m.latency", reporter_options: [buckets: [10, 100]])
+      config = %{
+        export_period: 60_000,
+        metrics: [dist],
+        name: :pull_dist_warn_test,
+        pull_mode: true
+      }
+
+      log = capture_log(fn -> start_supervised!({MetricStore, config}, id: :dist_warn_store) end)
+
       assert log =~ "does not support distribution metrics"
+      assert log =~ "m.latency"
     end
 
     test "full lifecycle across two generations" do
