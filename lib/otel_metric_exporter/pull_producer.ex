@@ -65,8 +65,14 @@ defmodule OtelMetricExporter.PullProducer do
   defp pull_and_emit(%{pending_demand: 0} = state), do: {:noreply, [], state}
 
   defp pull_and_emit(%{collector: nil} = state) do
-    {:ok, collector} = MetricStore.prepare_to_collect(state.metric_store_name)
-    do_collect(state, collector)
+    # Cheap atomic check before making a GenServer call — keeps MetricStore
+    # idle (and eligible to hibernate) between rotate_and_trim cycles.
+    if MetricStore.generation_available?(state.metric_store_name) do
+      {:ok, collector} = MetricStore.prepare_to_collect(state.metric_store_name)
+      do_collect(state, collector)
+    else
+      {:noreply, [], schedule_tick(state)}
+    end
   end
 
   defp pull_and_emit(%{collector: collector} = state) do

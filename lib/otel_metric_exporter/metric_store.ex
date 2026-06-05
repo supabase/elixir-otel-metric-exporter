@@ -112,6 +112,16 @@ defmodule OtelMetricExporter.MetricStore do
   """
   def prepare_to_collect(name), do: GenServer.call(name, :prepare_to_collect)
 
+  @doc """
+  Returns true if a sealed generation is waiting to be drained.
+  Uses atomic reads only — no GenServer call — so the MetricStore process
+  is not woken up. Safe to call at high frequency from PullProducer.
+  """
+  @spec generation_available?(atom()) :: boolean()
+  def generation_available?(metrics_table) do
+    get_current_gen(metrics_table) != peek_earliest_gen(metrics_table)
+  end
+
   @spec record_count(atom()) :: non_neg_integer()
   def record_count(name), do: :ets.info(name, :size)
 
