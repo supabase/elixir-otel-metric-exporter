@@ -400,11 +400,8 @@ defmodule OtelMetricExporter.MetricStore do
   # not in ETS) needed to reconstruct a well-formed histogram event.
   defp rows_to_events(rows, gen_meta) do
     rows
-    |> Enum.reject(fn
-      {{_, _, :distribution, _, _}, _, _} -> true
-      _ -> false
-    end)
     |> Enum.map(&row_to_event(&1, gen_meta))
+    |> Enum.reject(&is_nil(&1))
   end
 
   # Convert atom tag values to strings. Tags arriving from UserMonitoring telemetry
@@ -423,20 +420,6 @@ defmodule OtelMetricExporter.MetricStore do
   #   :distribution → "histogram"  (was {:histogram, ...})
   #   :last_value   → "gauge"      (was {:gauge, ...})
   #   :counter/:sum → "sum"        (both became {:sum, ...})
-  defp row_to_event({{_gen, name, :distribution, tags, bucket}, count, sum}, {_, start, finish}) do
-    %{
-      "event_message" => name,
-      "metric_type" => "histogram",
-      "metadata" => %{"type" => "metric"},
-      "bucket" => bucket,
-      "count" => count,
-      "sum" => sum,
-      "attributes" => normalize_tags(tags),
-      "start_time" => start,
-      "timestamp" => finish
-    }
-  end
-
   defp row_to_event({{_gen, name, :last_value, tags, _}, value, _}, {_, start, finish}) do
     %{
       "event_message" => name,
@@ -465,6 +448,8 @@ defmodule OtelMetricExporter.MetricStore do
       "timestamp" => finish
     }
   end
+
+  defp row_to_event({{_gen, _name, _type, _tags, _}, _value, _}, {_, _start, _finish}), do: nil
 
   defp convert_metric(
          %{name: name, description: description, unit: unit} = metric,
