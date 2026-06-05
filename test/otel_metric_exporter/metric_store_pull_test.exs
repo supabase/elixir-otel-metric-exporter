@@ -119,9 +119,9 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       # so BigQuery schemas and existing queries remain compatible.
       tags = %{id: "t"}
 
-      counter  = Metrics.counter("m.counter")
-      sum      = Metrics.sum("m.sum")
-      gauge    = Metrics.last_value("m.gauge")
+      counter = Metrics.counter("m.counter")
+      sum = Metrics.sum("m.sum")
+      gauge = Metrics.last_value("m.gauge")
 
       MetricStore.write_metric(@name, counter, 1, tags)
       MetricStore.write_metric(@name, sum, 10, tags)
@@ -152,7 +152,7 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       # reporter_options, not in ETS) to reconstruct a valid histogram event.
       # Pull mode drops them silently at collection time (warning fires once at startup).
       metric = Metrics.distribution("m.latency", reporter_options: [buckets: [10, 100, 1000]])
-      sum    = Metrics.sum("m.bytes")
+      sum = Metrics.sum("m.bytes")
 
       MetricStore.write_metric(@name, metric, 50, %{"user_id" => "a"})
       MetricStore.write_metric(@name, sum, 100, %{"user_id" => "a"})
@@ -167,7 +167,8 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     test "warns at startup when pull_mode store is configured with distribution metrics" do
       import ExUnit.CaptureLog
 
-      dist   = Metrics.distribution("m.latency", reporter_options: [buckets: [10, 100]])
+      dist = Metrics.distribution("m.latency", reporter_options: [buckets: [10, 100]])
+
       config = %{
         export_period: 60_000,
         metrics: [dist],

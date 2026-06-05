@@ -466,7 +466,6 @@ defmodule OtelMetricExporter.MetricStore do
     }
   end
 
-
   defp convert_metric(
          %{name: name, description: description, unit: unit} = metric,
          values

@@ -113,9 +113,9 @@ defmodule OtelMetricExporter.PullProducer do
   # The single-batch case (overwhelmingly common) returns the list directly — O(1).
   # Multiple batches (rare: only when several generations drain in one demand cycle)
   # reverse then concat — O(k) on batch count + O(n) on total events.
-  defp flatten_acc([]),       do: []
+  defp flatten_acc([]), do: []
   defp flatten_acc([single]), do: single
-  defp flatten_acc(acc),      do: acc |> Enum.reverse() |> Enum.concat()
+  defp flatten_acc(acc), do: acc |> Enum.reverse() |> Enum.concat()
 
   defp emit_telemetry(emitted, metric_store_name) do
     :telemetry.execute(
