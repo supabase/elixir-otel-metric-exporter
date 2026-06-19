@@ -32,6 +32,7 @@ defmodule OtelMetricExporter.PullProducer do
   alias OtelMetricExporter.MetricStore
 
   @default_pull_interval 1000
+  @default_drain_tick_interval 100
 
   def start_link(opts) do
     GenStage.start_link(__MODULE__, opts, name: opts[:name])
@@ -42,6 +43,7 @@ defmodule OtelMetricExporter.PullProducer do
     state = %{
       metric_store_name: Keyword.fetch!(opts, :metric_store_name),
       pull_interval: Keyword.get(opts, :pull_interval, @default_pull_interval),
+      drain_tick_interval: Keyword.get(opts, :drain_tick_interval, @default_drain_tick_interval),
       pending_demand: 0,
       tick_ref: nil,
       collector: nil,
@@ -52,9 +54,14 @@ defmodule OtelMetricExporter.PullProducer do
   end
 
   @impl true
-  def handle_demand(incoming, state) do
+  def handle_demand(incoming, %{collector: nil} = state) do
     state = %{state | pending_demand: state.pending_demand + incoming}
     {:noreply, [], schedule_tick(state)}
+  end
+
+  def handle_demand(incoming, state) do
+    state = %{state | pending_demand: state.pending_demand + incoming}
+    {:noreply, [], schedule_drain_tick(state)}
   end
 
   @impl true
@@ -111,6 +118,15 @@ defmodule OtelMetricExporter.PullProducer do
       %{emitted: emitted, remaining: MetricStore.record_count(metric_store_name)},
       %{metric_store_name: metric_store_name}
     )
+  end
+
+  defp schedule_drain_tick(%{tick_ref: ref} = state) when is_reference(ref), do: state
+
+  defp schedule_drain_tick(state) do
+    elapsed = System.monotonic_time(:millisecond) - state.last_tick_at
+    delay = max(state.drain_tick_interval - elapsed, 0)
+    ref = Process.send_after(self(), :tick, delay)
+    %{state | tick_ref: ref}
   end
 
   defp schedule_tick(%{tick_ref: ref} = state) when is_reference(ref), do: state
