@@ -17,6 +17,7 @@ defmodule OtelMetricExporter.MetricStore do
   }
 
   alias OtelMetricExporter.OtelApi
+  alias OtelMetricExporter.OtlpUtils
 
   import OtelMetricExporter.OtlpUtils, only: [build_kv: 1]
 
@@ -141,7 +142,8 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   def write_metric(_metrics_table, %Metrics.Sum{} = _metric, _string_name, value, _tags)
-      when not is_number(value), do: :ok
+      when not is_number(value),
+      do: :ok
 
   def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
     generation = get_current_gen(metrics_table)
@@ -150,6 +152,16 @@ defmodule OtelMetricExporter.MetricStore do
     :ets.update_counter(metrics_table, ets_key, value, {ets_key, 0, nil})
   end
 
+  def write_metric(
+        _metrics_table,
+        %Metrics.LastValue{} = _metric,
+        _string_name,
+        value,
+        _tags
+      )
+      when not is_number(value),
+      do: :ok
+
   def write_metric(metrics_table, %Metrics.LastValue{} = metric, string_name, value, tags) do
     generation = get_current_gen(metrics_table)
     ets_key = {generation, string_name, metric_type(metric), tags, nil}
@@ -157,7 +169,8 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   def write_metric(_metrics_table, %Metrics.Distribution{} = _metric, _string_name, value, _tags)
-      when not is_number(value), do: :ok
+      when not is_number(value),
+      do: :ok
 
   def write_metric(metrics_table, %Metrics.Distribution{} = metric, string_name, value, tags) do
     bucket = find_bucket(metric, value)
@@ -322,19 +335,47 @@ defmodule OtelMetricExporter.MetricStore do
     current_gen = rotate_generation(state)
     earliest_gen = earliest_gen(state.generations_table)
 
-    metrics =
-      collect_metrics(state, earliest_gen, current_gen) |> transform_metrics(state.metrics)
-
-    case OtelApi.send_metrics(state.api, metrics) do
+    case send_metrics(state, earliest_gen, current_gen) do
       :ok ->
         clear_generations(state, earliest_gen..current_gen//1)
         :ok
 
       {:error, reason} = err ->
-        Logger.error("Failed to export metrics: #{inspect(reason)}")
+        Logger.error("Failed to export metrics: #{format_export_error(reason)}")
         err
     end
   end
+
+  defp send_metrics(state, earliest_gen, current_gen) do
+    metrics =
+      state
+      |> collect_metrics(earliest_gen, current_gen)
+      |> transform_metrics(state.metrics)
+
+    OtelApi.send_metrics(state.api, metrics)
+  rescue
+    exception ->
+      {:error, {:exception, exception, __STACKTRACE__}}
+  catch
+    kind, reason ->
+      {:error, {kind, reason, __STACKTRACE__}}
+  end
+
+  defp format_export_error(reason) do
+    do_format_export_error(reason)
+  rescue
+    _exception -> "unformattable export error"
+  catch
+    _kind, _reason -> "unformattable export error"
+  end
+
+  defp do_format_export_error({kind, reason, stacktrace}) when kind in [:throw, :exit, :error],
+    do: Exception.format(kind, reason, stacktrace)
+
+  defp do_format_export_error({:exception, exception, stacktrace}),
+    do: Exception.format(:error, exception, stacktrace)
+
+  defp do_format_export_error(reason), do: inspect(reason)
 
   defp collect_metrics(%State{} = state, earliest_gen, current_gen) do
     earliest_gen..current_gen//1
@@ -414,15 +455,29 @@ defmodule OtelMetricExporter.MetricStore do
     |> Enum.reject(&is_nil(&1))
   end
 
-  # Convert atom tag values to strings. Tags arriving from UserMonitoring telemetry
-  # already have binary keys and no nested maps (enforced by extract_tags/2), so only
-  # atom values need normalizing — e.g. a source_token stored as an atom becomes a
-  # string, matching what the old build_kv → protobuf → Otel.handle_attributes path produced.
+  # Keep the established atom/binary keys returned by pull mode, while making arbitrary
+  # keys and values safe for downstream JSON encoding.
   defp normalize_tags(tags) when is_map(tags) do
     Map.new(tags, fn
-      {k, v} when is_atom(v) -> {k, Atom.to_string(v)}
-      {k, v} -> {k, v}
+      {key, value} -> {normalize_tag_key(key), OtlpUtils.normalize_value(value)}
     end)
+  end
+
+  defp normalize_tags(tags), do: OtlpUtils.normalize_attributes(tags)
+
+  defp normalize_tag_key(key) when is_atom(key), do: key
+
+  defp normalize_tag_key(key) when is_binary(key) do
+    if String.valid?(key), do: key, else: normalized_tag_key(key)
+  end
+
+  defp normalize_tag_key(key), do: normalized_tag_key(key)
+
+  defp normalized_tag_key(key) do
+    [{key, nil}]
+    |> OtlpUtils.normalize_attributes()
+    |> Map.keys()
+    |> List.first("<unprintable>")
   end
 
   # metric_type strings must match what OtelMetric.handle_metric produced via the

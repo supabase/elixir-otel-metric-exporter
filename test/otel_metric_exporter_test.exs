@@ -184,6 +184,66 @@ defmodule OtelMetricExporterTest do
       stop_supervised!(OtelMetricExporter)
     end
 
+    test "isolates metric callback failures without detaching the handler" do
+      event_name = [:test, :bad_metric]
+
+      metrics = [
+        Telemetry.Metrics.sum(
+          "test.bad_metric.raise",
+          event_name: event_name,
+          measurement: fn
+            _measurements, %{bad?: true} -> raise "bad telemetry payload"
+            measurements, _metadata -> measurements.value
+          end
+        ),
+        Telemetry.Metrics.sum(
+          "test.bad_metric.throw",
+          event_name: event_name,
+          measurement: fn
+            _measurements, %{bad?: true} -> throw(:bad_telemetry_payload)
+            measurements, _metadata -> measurements.value
+          end
+        ),
+        Telemetry.Metrics.sum(
+          "test.bad_metric.exit",
+          event_name: event_name,
+          measurement: fn
+            _measurements, %{bad?: true} -> exit(:bad_telemetry_payload)
+            measurements, _metadata -> measurements.value
+          end
+        ),
+        Telemetry.Metrics.sum(
+          "test.bad_metric.good",
+          event_name: event_name,
+          measurement: :value
+        )
+      ]
+
+      start_supervised!({OtelMetricExporter, @base_config ++ [metrics: metrics]})
+
+      handler_id = {OtelMetricExporter.TelemetryHandlers, @name, event_name}
+
+      log =
+        capture_log(fn ->
+          :telemetry.execute(event_name, %{value: 1}, %{bad?: true})
+          Process.sleep(50)
+        end)
+
+      assert log =~ "Failed to record telemetry metric"
+      assert Enum.any?(:telemetry.list_handlers(event_name), &(&1.id == handler_id))
+
+      recorded = OtelMetricExporter.MetricStore.get_metrics(@name)
+      assert get_in(recorded, [{:sum, "test.bad_metric.good"}, %{}]) == 1
+
+      :telemetry.execute(event_name, %{value: 2}, %{})
+
+      recorded = OtelMetricExporter.MetricStore.get_metrics(@name)
+      assert get_in(recorded, [{:sum, "test.bad_metric.raise"}, %{}]) == 2
+      assert get_in(recorded, [{:sum, "test.bad_metric.throw"}, %{}]) == 2
+      assert get_in(recorded, [{:sum, "test.bad_metric.exit"}, %{}]) == 2
+      assert get_in(recorded, [{:sum, "test.bad_metric.good"}, %{}]) == 3
+    end
+
     test "handles detaching of handlers on shutdown" do
       test_event = :"event_#{inspect(self())}"
 

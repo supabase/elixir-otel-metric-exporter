@@ -83,6 +83,17 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert %{{:last_value, "test.value"} => %{^tags => 2}} = metrics
     end
 
+    test "ignores last value metrics when value is not numeric" do
+      metric = Metrics.last_value("test.value")
+      tags = %{test: "value"}
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+      MetricStore.write_metric(@name, metric, :not_supported, tags)
+
+      assert %{{:last_value, "test.value"} => %{^tags => 1}} =
+               MetricStore.get_metrics(@name)
+    end
+
     test "records distribution metrics" do
       metric = Metrics.distribution("test.value", reporter_options: [buckets: [2, 4]])
       tags = %{test: "value"}
@@ -275,6 +286,53 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert MetricStore.get_metrics(@name, 0) == %{}
     end
 
+    test "exports metrics with arbitrary Elixir terms in tags", %{
+      bypass: bypass,
+      store_config: config
+    } do
+      metric = Metrics.sum("test.sum")
+      start_supervised!({MetricStore, %{config | metrics: [metric]}})
+      test_pid = self()
+
+      tags = %{
+        {:tuple, :key} => {:tuple, test_pid},
+        nested: %{test_pid => MapSet.new([:a])}
+      }
+
+      Bypass.expect_once(bypass, "POST", "/v1/metrics", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        request = ExportMetricsServiceRequest.decode(body)
+        assert [%{scope_metrics: [%{metrics: [metric]}]}] = request.resource_metrics
+        assert {:sum, %{data_points: [%{attributes: attributes}]}} = metric.data
+
+        attributes = Map.new(attributes, &{&1.key, &1.value})
+
+        assert %{
+                 value:
+                   {:array_value,
+                    %{
+                      values: [
+                        %{value: {:string_value, "tuple"}},
+                        %{value: {:string_value, pid}}
+                      ]
+                    }}
+               } = attributes[inspect({:tuple, :key})]
+
+        assert pid == inspect(test_pid)
+
+        nested_key = Enum.find(Map.keys(attributes), &String.starts_with?(&1, "nested.#PID<"))
+        assert %{value: {:string_value, map_set}} = attributes[nested_key]
+        assert map_set == inspect(MapSet.new([:a]))
+
+        Plug.Conn.resp(conn, 200, "")
+      end)
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+
+      assert :ok = MetricStore.export_sync(@name)
+    end
+
     test "handles server errors gracefully", %{bypass: bypass, store_config: config} do
       metric = Metrics.sum("test.sum")
       tags = %{test: "value"}
@@ -292,6 +350,24 @@ defmodule OtelMetricExporter.MetricStoreTest do
       assert capture_log(fn -> MetricStore.export_sync(@name) end) =~ "Failed to export metrics"
 
       # Verify metrics were not cleared due to error
+      assert MetricStore.get_metrics(@name, 0) == metrics
+    end
+
+    test "handles metric transformation errors gracefully", %{store_config: config} do
+      metric = %{Metrics.last_value("test.last_value") | unit: "invalid unit"}
+      tags = %{test: "value"}
+      start_supervised!({MetricStore, %{config | metrics: [metric]}})
+
+      MetricStore.write_metric(@name, metric, 1, tags)
+      metrics = MetricStore.get_metrics(@name)
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:exception, _exception, _stacktrace}} = MetricStore.export_sync(@name)
+        end)
+
+      assert log =~ "Failed to export metrics"
+      assert Process.alive?(Process.whereis(@name))
       assert MetricStore.get_metrics(@name, 0) == metrics
     end
 
@@ -451,6 +527,28 @@ defmodule OtelMetricExporter.MetricStoreTest do
 
       # Both generation 0 (drained) is cleared
       assert MetricStore.get_metrics(@name, 0) == %{}
+    end
+
+    test "callback exceptions do not crash the store or discard metrics", %{store_config: config} do
+      metric = Metrics.sum("test.sum")
+      tags = %{test: "value"}
+      callback = fn _payload, _config -> raise "callback failed" end
+
+      start_supervised!(
+        {MetricStore, Map.merge(config, %{export_callback: callback, metrics: [metric]})}
+      )
+
+      MetricStore.write_metric(@name, metric, 3, tags)
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:exception, %RuntimeError{}, _stacktrace}} =
+                   MetricStore.export_sync(@name)
+        end)
+
+      assert log =~ "callback failed"
+      assert Process.alive?(Process.whereis(@name))
+      assert %{{:sum, "test.sum"} => %{^tags => 3}} = MetricStore.get_metrics(@name, 0)
     end
   end
 

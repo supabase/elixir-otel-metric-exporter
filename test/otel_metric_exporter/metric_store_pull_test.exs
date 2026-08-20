@@ -57,6 +57,40 @@ defmodule OtelMetricExporter.MetricStorePullTest do
       assert event["metadata"] == %{"type" => "metric"}
     end
 
+    test "normalizes arbitrary tag terms for downstream encoding" do
+      metric = Metrics.sum("pull.test.sum")
+      pid = self()
+
+      tags = %{
+        :id => pid,
+        {:tuple, :key} => MapSet.new([:a]),
+        :nested => %{pid => {:ok, pid}},
+        :raw => <<255>>
+      }
+
+      MetricStore.write_metric(@name, metric, 5, tags)
+      rotate(@name)
+      {:ok, collector} = MetricStore.prepare_to_collect(@name)
+      assert {:ok, [event], :done} = collector.(:infinity)
+
+      assert event["attributes"] == %{
+               :id => inspect(pid),
+               inspect({:tuple, :key}) => inspect(MapSet.new([:a])),
+               :nested => %{inspect(pid) => ["ok", inspect(pid)]},
+               :raw => inspect(<<255>>)
+             }
+    end
+
+    test "tolerates malformed outer tags" do
+      metric = Metrics.sum("pull.test.sum")
+      MetricStore.write_metric(@name, metric, 5, [{:valid, 1}, :invalid])
+      rotate(@name)
+      {:ok, collector} = MetricStore.prepare_to_collect(@name)
+
+      assert {:ok, [%{"attributes" => %{"valid" => 1}}], :done} =
+               collector.(:infinity)
+    end
+
     test "bounded drain: collector returns {:more, next} when rows remain" do
       metric = Metrics.sum("pull.test.sum")
       MetricStore.write_metric(@name, metric, 1, %{id: "a"})
