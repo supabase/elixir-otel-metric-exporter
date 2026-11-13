@@ -140,15 +140,8 @@ defmodule OtelMetricExporter.MetricStore do
     :ets.update_counter(metrics_table, ets_key, 1, {ets_key, 0, nil})
   end
 
-  def write_metric(_metrics_table, %Metrics.Sum{} = _metric, _string_name, value, _tags)
-      when not is_number(value), do: :ok
-
-  def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags) do
-    generation = get_current_gen(metrics_table)
-    ets_key = {generation, string_name, metric_type(metric), tags, nil}
-
-    :ets.update_counter(metrics_table, ets_key, value, {ets_key, 0, nil})
-  end
+  def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags),
+    do: write_metric(metrics_table, metric, string_name, value, tags, 0)
 
   def write_metric(metrics_table, %Metrics.LastValue{} = metric, string_name, value, tags) do
     generation = get_current_gen(metrics_table)
@@ -173,6 +166,46 @@ defmodule OtelMetricExporter.MetricStore do
       {ets_key, 0, 0}
     )
   end
+
+  @doc """
+  Writes a sum together with its secondary measurement.
+
+  Whether a row has a secondary slot depends only on the metric definition, so every
+  write for a definition produces the same row shape. A secondary value that is not an
+  integer counts as 0.
+  """
+  def write_metric(_metrics_table, %Metrics.Sum{}, _string_name, value, _tags, _secondary)
+      when not is_number(value), do: :ok
+
+  def write_metric(metrics_table, %Metrics.Sum{} = metric, string_name, value, tags, secondary) do
+    generation = get_current_gen(metrics_table)
+
+    case secondary_measurement(metric) do
+      nil ->
+        ets_key = {generation, string_name, :sum, tags, nil}
+        :ets.update_counter(metrics_table, ets_key, value, {ets_key, 0, nil})
+
+      secondary_key ->
+        ets_key = {generation, string_name, :sum, tags, secondary_key}
+        secondary = if is_integer(secondary), do: secondary, else: 0
+
+        :ets.update_counter(
+          metrics_table,
+          ets_key,
+          [{2, value}, {3, secondary}],
+          {ets_key, 0, 0}
+        )
+    end
+  end
+
+  @doc """
+  Returns the secondary measurement key of a sum, or nil.
+  """
+  @spec secondary_measurement(Metrics.t()) :: term() | nil
+  def secondary_measurement(%Metrics.Sum{reporter_options: opts}) when is_list(opts),
+    do: Keyword.get(opts, :secondary_measurement)
+
+  def secondary_measurement(_metric), do: nil
 
   defp find_bucket(%Metrics.Distribution{reporter_options: opts}, value) do
     bucket_bounds = Keyword.get(opts, :buckets, @default_buckets)
@@ -202,6 +235,17 @@ defmodule OtelMetricExporter.MetricStore do
       if dist_names != [] do
         Logger.warning(
           "Pull mode does not support distribution metrics, they will be dropped: #{inspect(dist_names)}"
+        )
+      end
+    else
+      secondary_names =
+        metrics
+        |> Enum.filter(&secondary_measurement/1)
+        |> Enum.map(&Enum.join(&1.name, "."))
+
+      if secondary_names != [] do
+        Logger.warning(
+          "Secondary measurements are only exported in pull mode, they will be dropped: #{inspect(secondary_names)}"
         )
       end
     end
@@ -444,12 +488,15 @@ defmodule OtelMetricExporter.MetricStore do
 
   @sum_temporality "cumulative"
 
-  defp row_to_event({{_gen, name, type, tags, _}, value, _}, {_, start, finish})
+  defp row_to_event(
+         {{_gen, name, type, tags, secondary_key}, value, secondary},
+         {_, start, finish}
+       )
        when type in [:counter, :sum] do
     %{
       "event_message" => name,
       "metric_type" => "sum",
-      "metadata" => %{"type" => "metric"},
+      "metadata" => sum_metadata(secondary_key, secondary),
       "aggregation_temporality" => @sum_temporality,
       "is_monotonic" => type == :counter,
       "value" => value,
@@ -460,6 +507,12 @@ defmodule OtelMetricExporter.MetricStore do
   end
 
   defp row_to_event({{_gen, _name, _type, _tags, _}, _value, _}, {_, _start, _finish}), do: nil
+
+  defp sum_metadata(secondary_key, secondary)
+       when not is_nil(secondary_key) and is_integer(secondary) and secondary != 0,
+       do: %{"type" => "metric", to_string(secondary_key) => secondary}
+
+  defp sum_metadata(_secondary_key, _secondary), do: %{"type" => "metric"}
 
   defp convert_metric(
          %{name: name, description: description, unit: unit} = metric,
