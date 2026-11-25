@@ -270,6 +270,70 @@ defmodule OtelMetricExporter.MetricStorePullTest do
     end
   end
 
+  describe "secondary measurement" do
+    setup %{store_config: config} do
+      metric =
+        Metrics.sum("pull.test.bytes", reporter_options: [secondary_measurement: :excluded_bytes])
+
+      config = %{config | metrics: [metric]}
+      {:ok, store: start_supervised!({MetricStore, config}), metric: metric}
+    end
+
+    test "accumulates both totals in one row and exports one event", %{metric: metric} do
+      tags = %{"project" => "abc"}
+
+      MetricStore.write_metric(@name, metric, "pull.test.bytes", 600, tags, 0)
+      MetricStore.write_metric(@name, metric, "pull.test.bytes", 0, tags, 400)
+      MetricStore.write_metric(@name, metric, "pull.test.bytes", 100, tags, 50)
+
+      assert MetricStore.record_count(@name) == 1
+
+      assert {:ok, [event]} = MetricStore.pull(@name)
+      assert event["event_message"] == "pull.test.bytes"
+      assert event["value"] == 700
+      assert event["metadata"] == %{"type" => "metric", "excluded_bytes" => 450}
+    end
+
+    test "omits the secondary total when it is zero", %{metric: metric} do
+      MetricStore.write_metric(@name, metric, "pull.test.bytes", 600, %{}, 0)
+
+      assert {:ok, [event]} = MetricStore.pull(@name)
+      assert event["value"] == 600
+      assert event["metadata"] == %{"type" => "metric"}
+    end
+
+    test "counts a missing or non-integer secondary as zero", %{metric: metric} do
+      for secondary <- [nil, :bad, "12", 1.5] do
+        MetricStore.write_metric(@name, metric, "pull.test.bytes", 10, %{}, secondary)
+      end
+
+      assert {:ok, [event]} = MetricStore.pull(@name)
+      assert event["value"] == 40
+      assert event["metadata"] == %{"type" => "metric"}
+    end
+
+    test "a write without a secondary value lands in the same row", %{metric: metric} do
+      MetricStore.write_metric(@name, metric, 5, %{})
+      MetricStore.write_metric(@name, metric, "pull.test.bytes", 5, %{}, 3)
+
+      assert MetricStore.record_count(@name) == 1
+
+      assert {:ok, [event]} = MetricStore.pull(@name)
+      assert event["value"] == 10
+      assert event["metadata"] == %{"type" => "metric", "excluded_bytes" => 3}
+    end
+
+    test "a sum without the option keeps its row and event shape" do
+      plain = Metrics.sum("pull.test.plain")
+      MetricStore.write_metric(@name, plain, 7, %{})
+
+      assert [{{_gen, "pull.test.plain", :sum, %{}, nil}, 7, nil}] = :ets.tab2list(@name)
+
+      assert {:ok, [event]} = MetricStore.pull(@name)
+      assert event["metadata"] == %{"type" => "metric"}
+    end
+  end
+
   test "max_table_memory enforced in pull mode without pull call" do
     metric = Telemetry.Metrics.sum("pull.trim.value")
 

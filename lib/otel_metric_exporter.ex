@@ -31,6 +31,16 @@ defmodule OtelMetricExporter do
 
   Default histogram buckets are `#{inspect(MetricStore.default_buckets())}`
 
+  A sum can accumulate a second measurement of the same telemetry event without
+  creating another series (pull mode only):
+
+      Telemetry.Metrics.sum("ingest.ingested_bytes",
+        reporter_options: [secondary_measurement: :excluded_bytes]
+      )
+
+  The secondary total is exported on the same event, under `metadata`, keyed by the
+  measurement name. It is omitted when zero.
+
   See all available options in `start_link/2` documentation. Options provided to the `start_link/2`
   function will be merged with the options provided via `config :otel_metric_exporter` configuraiton.
   """
@@ -149,7 +159,15 @@ defmodule OtelMetricExporter do
           end
 
         metric_name = "#{Enum.join(metric.name, ".")}"
-        MetricStore.write_metric(name, metric, metric_name, value, tags)
+
+        case MetricStore.secondary_measurement(metric) do
+          nil ->
+            MetricStore.write_metric(name, metric, metric_name, value, tags)
+
+          key ->
+            secondary = Map.get(measurements, key)
+            MetricStore.write_metric(name, metric, metric_name, value, tags, secondary)
+        end
       end
     end
   end

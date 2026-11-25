@@ -184,6 +184,33 @@ defmodule OtelMetricExporterTest do
       stop_supervised!(OtelMetricExporter)
     end
 
+    test "accumulates a secondary measurement on the same series in pull mode" do
+      test_event = :"event_#{inspect(self())}"
+
+      metrics = [
+        Telemetry.Metrics.sum("test.event.bytes",
+          event_name: [:test, test_event],
+          measurement: :bytes,
+          reporter_options: [secondary_measurement: :excluded_bytes]
+        )
+      ]
+
+      start_supervised!({OtelMetricExporter, @base_config ++ [metrics: metrics, pull_mode: true]})
+
+      :telemetry.execute([:test, test_event], %{bytes: 600, excluded_bytes: 0}, %{})
+      :telemetry.execute([:test, test_event], %{bytes: 0, excluded_bytes: 400}, %{})
+      :telemetry.execute([:test, test_event], %{bytes: 5}, %{})
+      :telemetry.execute([:test, test_event], %{bytes: 5, excluded_bytes: :bad}, %{})
+
+      assert 1 == Enum.count(:telemetry.list_handlers([:test, test_event]))
+
+      assert {:ok, [event]} = OtelMetricExporter.MetricStore.pull(@name)
+      assert event["value"] == 610
+      assert event["metadata"] == %{"type" => "metric", "excluded_bytes" => 400}
+
+      stop_supervised!(OtelMetricExporter)
+    end
+
     test "handles detaching of handlers on shutdown" do
       test_event = :"event_#{inspect(self())}"
 
